@@ -13,6 +13,52 @@ This smart contract provides the following key features:
 - **Collateral Valuation**: Uses Chainlink Oracles to assess the value of collateral tokens to ensure an appropriate loan-to-value (LTV) ratio.
 - **Platform Fee**: Collects platform fees upon loan funding for platform maintenance and operations.
 
+```markdown
++----------------------------------------------------+
+|            Decentralized Social Lending            |
+|        Connecting Borrowers and Lenders            |
++----------------------------------------------------+
+                          |
+                          |
+              +-----------+-----------+
+              |                       |
+    +---------v---------+   +---------v---------+
+    |       Borrower    |   |        Lender     |
+    +--------------------+   +--------------------+
+              |                       |
+              |                       |
+              |                       |
+              |                       |
+              v                       v
+    +------------------------------------------------+
+    |           Smart Contract with Collateral       |
+    |                                                |
+    |  - Loan Request Creation                       |
+    |  - Collateral Locking                          |
+    |  - Loan Funding                                |
+    |  - Repayment Management                        |
+    |  - Default Handling and Collateral Liquidation |
+    +------------------------------------------------+
+                          |
+                          |
+                          v
+            +-------------------------------+
+            |  Secure Loan Transactions     |
+            |   on the Ethereum Blockchain  |
+            +-------------------------------+
+```
+
+### Basic Concept:
+
+1. **Borrower and Lender**: Borrowers and lenders connect on a decentralized social lending platform, creating a peer-to-peer network for lending.
+2. **Smart Contract with Collateral**: The smart contract manages the loan process and ensures security through the following functions:
+   - **Loan Request Creation**: Borrowers can create loan requests, specifying terms like loan amount and duration.
+   - **Collateral Locking**: Collateral is locked within the contract as a security measure.
+   - **Loan Funding**: Lenders review and fund loan requests, transferring funds to the borrower.
+   - **Repayment Management**: Borrowers repay the loan, and the smart contract tracks repayments.
+   - **Default Handling and Collateral Liquidation**: If a borrower defaults, the collateral is automatically liquidated to repay the lender.
+3. **Secure Loan Transactions on Ethereum**: All transactions are securely recorded on the Ethereum blockchain, enabling trustless, transparent, and secure lending without intermediaries.
+
 ## Features
 
 - **Secure Token Transfers**: Uses OpenZeppelin’s `SafeERC20` library for secure token transfers.
