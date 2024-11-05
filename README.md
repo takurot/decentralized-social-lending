@@ -234,8 +234,6 @@ This smart contract provides the following key features:
 
 ## Block Diagram
 
-以下がマークダウン形式で表現したブロック図です。この図は、GitHubや他のマークダウン対応プラットフォームでそのまま閲覧できるようにしています。
-
 ```markdown
 +-------------------------------+
 |       Social Lending          |
