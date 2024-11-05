@@ -186,6 +186,82 @@ This smart contract provides the following key features:
 - `DefaultDeclared`: Emitted when a default is declared.
 - `LoanCancelled`: Emitted when a loan request is canceled.
 
+## Block Diagram
+
+以下がマークダウン形式で表現したブロック図です。この図は、GitHubや他のマークダウン対応プラットフォームでそのまま閲覧できるようにしています。
+
+```markdown
++-------------------------------+
+|       Social Lending          |
+|     with Collateral           |
++-------------------------------+
+               |
+               |
++--------------v---------------+
+|     Borrower Requests        |
+|        Loan Details          |
+| (amount, interest rate,      |
+|  duration, collateral)       |
++--------------+---------------+
+               |
+               |
++--------------v---------------+
+|   Loan Request Created       |
+|  Collateral Locked in        |
+|      Contract                |
++--------------+---------------+
+               |
+               |
++--------------v---------------+
+|     Lender Reviews           |
+|       & Funds Loan           |
+|       (ETH transferred)      |
++--------------+---------------+
+               |
+               |
++--------------v---------------+
+|    Loan Funded: Contract     |
+|    Transfers ETH to          |
+|        Borrower              |
++--------------+---------------+
+               |
+               |
++--------------v---------------+
+|   Borrower Repays Loan       |
+|     (Full or Partial)        |
++--------------+---------------+
+               |
+               |
++--------------v---------------+
+|    Loan Repayment Status     |
+|       Checked & Updated      |
++--------------+---------------+
+               |
+               |
+   +-----------+-----------+
+   |                       |
+   |                       |
++--v--+               +----v----+
+|Loan |               | Default |
+|Repaid                Declared |
+| (Full repayment)     (Expired |
+| triggers release     loan,    |
+| of collateral)       collateral|
+|                       liquidated|
++------+               +---------+
+```
+
+### Explanation:
+
+1. **Borrower Requests Loan**: The borrower submits loan details such as the amount, interest rate, duration, and collateral.
+2. **Loan Request Created**: The collateral is locked in the contract, and the loan request is created.
+3. **Lender Funds Loan**: The lender reviews and funds the loan by transferring ETH.
+4. **Loan Funded**: The smart contract transfers ETH to the borrower, completing the loan.
+5. **Borrower Repays Loan**: The borrower repays the loan in full or partially.
+6. **Loan Repayment Status Checked & Updated**: The contract checks and updates the loan repayment status.
+7. **Loan Repaid**: If the loan is fully repaid, the collateral is released back to the borrower.
+8. **Default Declared**: If the loan is overdue, a default is declared, and the collateral is liquidated to the lender.
+
 ## Security Notes
 
 - **Audit**: This contract is intended for educational purposes and should undergo a security audit before deployment in a production environment.
