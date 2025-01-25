@@ -4,12 +4,13 @@ pragma solidity ^0.8.0;
 // OpenZeppelinのライブラリをインポート
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 // Chainlinkのオラクルインターフェースをインポート
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-contract SocialLendingWithCollateral is ReentrancyGuard {
+contract SocialLendingWithCollateral is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
 
     // ローンの状態を表す列挙型
@@ -44,23 +45,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard {
     // ローン・トゥ・バリュー（LTV）比率（例: 5000で50%）
     uint256 public ltvRatio = 5000;
 
-    // コンストラクタ
-    constructor(address _feeRecipient) {
-        feeRecipient = _feeRecipient;
-    }
-
-    // 修飾子: 借り手のみ
-    modifier onlyBorrower(uint256 loanId) {
-        require(msg.sender == loans[loanId].borrower, "Only borrower can call this function");
-        _;
-    }
-
-    // 修飾子: 貸し手のみ
-    modifier onlyLender(uint256 loanId) {
-        require(msg.sender == loans[loanId].lender, "Only lender can call this function");
-        _;
-    }
-
     // イベントの定義
     event LoanRequested(
         uint256 indexed loanId,
@@ -76,11 +60,65 @@ contract SocialLendingWithCollateral is ReentrancyGuard {
     event LoanRepaid(uint256 indexed loanId, address indexed borrower, address indexed lender, uint256 repaymentAmount);
     event DefaultDeclared(uint256 indexed loanId, address indexed lender);
     event LoanCancelled(uint256 indexed loanId, address indexed borrower);
+    event PriceFeedUpdated(address indexed token, address indexed priceFeed);
+    event PlatformFeeUpdated(uint256 newFee);
+    event FeeRecipientUpdated(address indexed newRecipient);
+    event LTVRatioUpdated(uint256 newRatio);
+
+        // コンストラクタ
+    constructor(address _feeRecipient) {
+        feeRecipient = _feeRecipient;
+        _transferOwnership(msg.sender);
+    }
+
+    ///// コントラクト動作説明用のコメント追加 /////
+    /*
+    コントラクトの主要な動作フロー:
+    
+    1. ローンリクエスト
+    - 借り手が担保トークンと条件を指定してリクエスト
+    - 担保価値がLTV比率を満たすことを検証
+    - 担保トークンをコントラクトに預託
+    
+    2. ローン資金提供
+    - 貸し手がETHでローンを資金化
+    - プラットフォーム手数料を控除
+    - 残金を借り手に送金
+    
+    3. 返済プロセス
+    - 借り手が部分返済/全額返済可能
+    - 全額返済時: 担保を返却
+    - 返済期限超過時: 担保没収
+    
+    4. デフォルト処理
+    - 自動検出（誰でも実行可能）or 貸し手が手動実行
+    - 担保を貸し手に移転
+    
+    主要なセキュリティ機能:
+    - リエントランシー攻撃防止（ReentrancyGuard）
+    - 価格フィード検証（Chainlink Oracle）
+    - 入力パラメータ検証
+    - アクセス制御（Ownable）
+    */
+
+    // 修飾子: 借り手のみ
+    modifier onlyBorrower(uint256 loanId) {
+        require(msg.sender == loans[loanId].borrower, "Only borrower can call this function");
+        _;
+    }
+
+    // 修飾子: 貸し手のみ
+    modifier onlyLender(uint256 loanId) {
+        require(msg.sender == loans[loanId].lender, "Only lender can call this function");
+        _;
+    }
 
     // 担保トークンに対するプライスフィードを設定する関数（管理者用）
-    function setPriceFeed(address token, address priceFeed) external {
-        // 実際の運用ではアクセス制御が必要
+    function setPriceFeed(address token, address priceFeed) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(priceFeed != address(0), "Invalid price feed address");
         priceFeeds[token] = priceFeed;
+        emit PriceFeedUpdated(token, priceFeed);
     }
 
     // 借り手がローンをリクエストする関数
@@ -249,22 +287,23 @@ contract SocialLendingWithCollateral is ReentrancyGuard {
     }
 
     // プラットフォーム手数料を設定する関数（管理者用）
-    function setPlatformFee(uint256 _platformFee) external {
-        // 実際の運用ではアクセス制御が必要
+    function setPlatformFee(uint256 _platformFee) external onlyOwner {
         require(_platformFee <= 500, "Platform fee cannot exceed 5%");
         platformFee = _platformFee;
+        emit PlatformFeeUpdated(_platformFee);
     }
 
     // 手数料受取者を設定する関数（管理者用）
-    function setFeeRecipient(address _feeRecipient) external {
-        // 実際の運用ではアクセス制御が必要
+    function setFeeRecipient(address _feeRecipient) external onlyOwner {
+        require(_feeRecipient != address(0), "Invalid fee recipient address");
         feeRecipient = _feeRecipient;
+        emit FeeRecipientUpdated(_feeRecipient);
     }
 
     // LTV比率を設定する関数（管理者用）
-    function setLTVRatio(uint256 _ltvRatio) external {
-        // 実際の運用ではアクセス制御が必要
+    function setLTVRatio(uint256 _ltvRatio) external onlyOwner {
         require(_ltvRatio <= 10000, "LTV ratio cannot exceed 100%");
         ltvRatio = _ltvRatio;
+        emit LTVRatioUpdated(_ltvRatio);
     }
 }

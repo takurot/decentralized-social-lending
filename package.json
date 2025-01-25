@@ -1,0 +1,31 @@
+{
+  "name": "decentralized-social-lending",
+  "version": "1.0.0",
+  "description": "This repository provides a Solidity smart contract implementation for a collateral-backed social lending platform. This contract facilitates secure and efficient peer-to-peer lending between borrowers and lenders on the Ethereum network.",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@typechain/ethers-v6": "^0.5.1",
+    "@typechain/hardhat": "^9.1.0",
+    "@types/chai": "^4.3.20",
+    "@types/node": "^22.10.10",
+    "chai": "^4.5.0",
+    "ethers": "^6.13.5",
+    "hardhat": "^2.22.18",
+    "ts-node": "^10.9.2",
+    "typechain": "^8.3.2"
+  },
+  "dependencies": {
+    "@chainlink/contracts": "^1.3.0",
+    "@openzeppelin/contracts": "^4.9.0"
+  }
+}

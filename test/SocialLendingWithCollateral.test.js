@@ -114,4 +114,60 @@ describe("SocialLendingWithCollateral", function () {
         expect(loan.isRepaid).to.equal(true);
         expect(await collateralToken.balanceOf(lender.address)).to.equal(collateralAmount);
     });
+
+    it("should reject loan request with insufficient collateral", async function () {
+        const insufficientCollateral = collateralAmount.div(2);
+        
+        await collateralToken.connect(borrower).approve(lendingContract.address, insufficientCollateral);
+        
+        await expect(
+            lendingContract.connect(borrower).requestLoan(
+                loanAmount,
+                interestRate,
+                duration,
+                collateralToken.address,
+                insufficientCollateral
+            )
+        ).to.be.revertedWith("Insufficient collateral");
+    });
+
+    it("should prevent declaring default before duration", async function () {
+        const loanId = 3;
+        await collateralToken.connect(borrower).approve(lendingContract.address, collateralAmount);
+        await lendingContract.connect(borrower).requestLoan(
+            loanAmount,
+            interestRate,
+            duration,
+            collateralToken.address,
+            collateralAmount
+        );
+
+        await lendingContract.connect(lender).fundLoan(loanId, { value: loanAmount });
+        
+        await expect(
+            lendingContract.connect(lender).declareDefault(loanId)
+        ).to.be.revertedWith("Loan is not overdue");
+    });
+
+    it("should correctly distribute fees", async function () {
+        const initialBalance = await ethers.provider.getBalance(feeRecipient.address);
+        
+        // Create and fund loan
+        await collateralToken.connect(borrower).approve(lendingContract.address, collateralAmount);
+        await lendingContract.connect(borrower).requestLoan(
+            loanAmount,
+            interestRate,
+            duration,
+            collateralToken.address,
+            collateralAmount
+        );
+        await lendingContract.connect(lender).fundLoan(4, { value: loanAmount });
+
+        // Repay full loan
+        const repaymentAmount = loanAmount.add(loanAmount.mul(interestRate).div(10000));
+        await lendingContract.connect(borrower).repayLoan(4, { value: repaymentAmount });
+
+        const feeAmount = repaymentAmount.sub(loanAmount).sub(loanAmount.mul(interestRate).div(10000).mul(2));
+        expect(await ethers.provider.getBalance(feeRecipient.address)).to.equal(initialBalance.add(feeAmount));
+    });
 });
