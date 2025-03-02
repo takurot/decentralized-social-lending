@@ -61,12 +61,17 @@ This smart contract provides the following key features:
 
 ## Features
 
-- **Secure Token Transfers**: Uses OpenZeppelin’s `SafeERC20` library for secure token transfers.
+- **Secure Token Transfers**: Uses OpenZeppelin's `SafeERC20` library for secure token transfers.
 - **Reentrancy Protection**: Implements `ReentrancyGuard` to prevent reentrancy attacks.
-- **Loan State Management**: Manages loan states with an enum, clearly indicating the loan’s current status.
+- **Emergency Pause Functionality**: Ability to pause contract operations in case of emergencies.
+- **Loan State Management**: Manages loan states with an enum, clearly indicating the loan's current status.
 - **Partial Repayment Support**: Allows borrowers to make partial repayments to enable flexible repayment schedules.
 - **Automated Default Detection**: Allows anyone to check and declare a default if a loan has expired.
 - **Event Emission**: Emits events for critical actions, making off-chain monitoring easier.
+- **Collateral Token Whitelist**: Only pre-approved tokens can be used as collateral.
+- **Loan Tracking Per User**: Tracks active loans for both borrowers and lenders.
+- **Platform Statistics**: Provides statistical information about the platform's usage.
+- **Self-Funding Prevention**: Prevents users from funding their own loan requests.
 
 ## Requirements
 
@@ -187,6 +192,34 @@ This smart contract provides the following key features:
      - `collateralToken`: Address of the collateral token
      - `collateralAmount`: Amount of collateral tokens
 
+#### 8. Get Borrower Loans
+
+   ```solidity
+   function getBorrowerLoans(address borrower) external view returns (uint256[] memory)
+   ```
+
+   - **Description**: Retrieves all active loans for a specific borrower.
+   - **Parameters**:
+     - `borrower`: Address of the borrower
+
+#### 9. Get Lender Loans
+
+   ```solidity
+   function getLenderLoans(address lender) external view returns (uint256[] memory)
+   ```
+
+   - **Description**: Retrieves all active loans for a specific lender.
+   - **Parameters**:
+     - `lender`: Address of the lender
+
+#### 10. Get Platform Statistics
+
+   ```solidity
+   function getStats() external view returns (uint256, uint256, uint256, uint256, uint256)
+   ```
+
+   - **Description**: Retrieves platform statistics (total, active, repaid, defaulted, and cancelled loans).
+
 ### Admin Functions
 
 > **Note**: These functions require access control to restrict them to the contract administrator.
@@ -223,6 +256,23 @@ This smart contract provides the following key features:
 
    - **Description**: Sets the loan-to-value (LTV) ratio.
 
+#### 5. Set Collateral Token Status
+
+   ```solidity
+   function setCollateralTokenStatus(address token, bool allowed) external
+   ```
+
+   - **Description**: Sets the allowed status for a specific collateral token.
+
+#### 6. Emergency Pause/Unpause
+
+   ```solidity
+   function pause() external
+   function unpause() external
+   ```
+
+   - **Description**: Pauses or unpauses the contract operations in case of emergencies.
+
 ## Events
 
 - `LoanRequested`: Emitted when a loan is requested.
@@ -231,6 +281,7 @@ This smart contract provides the following key features:
 - `LoanRepaid`: Emitted when a loan is fully repaid.
 - `DefaultDeclared`: Emitted when a default is declared.
 - `LoanCancelled`: Emitted when a loan request is canceled.
+- `CollateralTokenStatusUpdated`: Emitted when a collateral token's allowed status is updated.
 
 ## Block Diagram
 
@@ -311,6 +362,7 @@ This smart contract provides the following key features:
 - **Audit**: This contract is intended for educational purposes and should undergo a security audit before deployment in a production environment.
 - **Access Control**: Admin functions should be restricted to authorized addresses, such as the contract owner.
 - **Oracle Reliability**: Ensure that the Chainlink oracles are configured correctly and trustworthy.
+- **Emergency Mechanism**: The contract includes a pause mechanism for emergency situations, but it should be used cautiously.
 
 ## License
 
