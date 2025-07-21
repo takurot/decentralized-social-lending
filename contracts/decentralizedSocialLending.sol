@@ -392,6 +392,18 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         return collateralValueInETH;
     }
 
+    // 現在の担保率(BASIS_POINTS=10000)を取得する関数
+    function getCollateralizationRatio(uint256 loanId) external view validLoanId(loanId) returns (uint256) {
+        Loan storage loan = loans[loanId];
+        if (loan.state != LoanState.Funded) revert InvalidLoanState();
+
+        uint256 collateralValue = getCollateralValueInETH(loan.collateralToken, loan.collateralAmount);
+        if (loan.remainingRepaymentAmount == 0) {
+            return type(uint256).max;
+        }
+        return collateralValue * BASIS_POINTS / loan.remainingRepaymentAmount;
+    }
+
     // 借り手のローン情報を取得する関数（ガス最適化版）
     function getBorrowerLoans(address borrower) external view returns (uint256[] memory) {
         // 実際のアクティブローン数をカウント

@@ -150,6 +150,42 @@ describe("SocialLendingWithCollateral", function () {
     });
   });
 
+  describe("担保率計算", function () {
+    beforeEach(async function () {
+      await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8));
+
+      const loanAmount = ethers.parseEther("1");
+      const interestRate = 500; // 5%
+      const duration = 30 * 24 * 60 * 60; // 30日
+      const collateralAmount = ethers.parseEther("0.001");
+      const tokenAddress = await mockToken.getAddress();
+
+      await socialLending.connect(borrower).requestLoan(
+        loanAmount,
+        interestRate,
+        duration,
+        tokenAddress,
+        collateralAmount
+      );
+
+      const loanId = 0;
+      const loan = await socialLending.loans(loanId);
+      await socialLending.connect(lender).fundLoan(loanId, { value: loan.principalAmount });
+    });
+
+    it("資金提供後の担保率が正しく計算されること", async function () {
+      const loanId = 0;
+      const price = ethers.parseUnits("2000", 8);
+      const collateralAmount = ethers.parseEther("0.001");
+      const collateralValue = (collateralAmount * price) / 10n ** 8n;
+
+      const loan = await socialLending.loans(loanId);
+      const expectedRatio = (collateralValue * BigInt(BASIS_POINTS)) / BigInt(loan.remainingRepaymentAmount);
+
+      expect(await socialLending.getCollateralizationRatio(loanId)).to.equal(expectedRatio);
+    });
+  });
+
   describe("ローン返済", function () {
     beforeEach(async function () {
       // プライスフィードの設定
