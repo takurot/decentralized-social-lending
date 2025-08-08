@@ -33,6 +33,20 @@ contract MockPriceFeed is AggregatorV3Interface, Ownable {
         _answeredInRound = _roundId;
     }
 
+    function setPriceData(
+        int256 price,
+        uint80 roundId,
+        uint256 startedAt,
+        uint256 updatedAt,
+        uint80 answeredInRound
+    ) external onlyOwner {
+        _price = price;
+        _roundId = roundId;
+        _startedAt = startedAt;
+        _updatedAt = updatedAt;
+        _answeredInRound = answeredInRound;
+    }
+
     function setDecimals(uint8 newDecimals) external onlyOwner {
         _decimals = newDecimals;
     }
