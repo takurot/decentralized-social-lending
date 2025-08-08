@@ -48,6 +48,46 @@ describe("SocialLendingWithCollateral", function () {
     });
   });
 
+  describe("セキュリティ強化", function () {
+    it("0アドレスの担保トークンは拒否されること", async function () {
+      await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8));
+
+      const loanAmount = ethers.parseEther("1");
+      const interestRate = 500;
+      const duration = 30 * 24 * 60 * 60;
+      const collateralAmount = ethers.parseEther("1");
+
+      await expect(
+        socialLending
+          .connect(borrower)
+          .requestLoan(loanAmount, interestRate, duration, ethers.ZeroAddress, collateralAmount)
+      ).to.be.revertedWithCustomError(socialLending, "InvalidAddress");
+    });
+
+    it("過剰なデシマル設定は拒否されること", async function () {
+      const tokenAddress = await mockToken.getAddress();
+      await expect(
+        socialLending.setCollateralTokenDecimals(tokenAddress, 19)
+      ).to.be.revertedWithCustomError(socialLending, "InvalidParameter");
+    });
+
+    it("不正な価格データが検出されること", async function () {
+      const tokenAddress = await mockToken.getAddress();
+      const now = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+      await mockPriceFeed.setPriceData(
+        ethers.parseUnits("2000", 8),
+        1n,
+        0n,
+        now,
+        1n
+      );
+
+      await expect(
+        socialLending.getCollateralValueInETH(tokenAddress, 1)
+      ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
+    });
+  });
+
   describe("ローンリクエスト", function () {
     it("有効なローンリクエストが作成できること", async function () {
       // プライスフィードの設定
