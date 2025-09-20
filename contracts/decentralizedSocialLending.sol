@@ -7,6 +7,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 
 // Chainlinkのオラクルインターフェースをインポート
 import "./interfaces/AggregatorV3Interface.sol";
@@ -26,7 +27,6 @@ error IncorrectFundingAmount();
 error StaleData();
 error PriceFeedNotAvailable();
 error InvalidPriceData();
-error TransferFailed();
 error InvalidAddress();
 error InvalidLoanId();
 error InvalidParameter();
@@ -34,6 +34,7 @@ error Unauthorized();
 
 contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     using SafeERC20 for IERC20;
+    using Address for address payable;
 
     // 定数
     uint256 public constant BASIS_POINTS = 10000;
@@ -197,6 +198,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      */
     function setCollateralTokenDecimals(address token, uint8 decimals) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
+        if (decimals > 18) revert InvalidParameter();
         collateralTokenDecimals[token] = decimals;
         emit CollateralTokenDecimalsUpdated(token, decimals);
     }
@@ -231,6 +233,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (interestRate == 0 || interestRate > MAX_INTEREST_RATE) revert InvalidInterestRate();
         if (duration == 0) revert InvalidDuration();
         if (collateralAmount == 0) revert InvalidCollateral();
+        if (collateralToken == address(0)) revert InvalidAddress();
         if (!allowedCollateralTokens[collateralToken]) revert TokenNotAllowed();
 
         // 担保価値の評価
@@ -305,12 +308,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 amountToBorrower = msg.value - feeAmount;
 
         // 手数料送金
-        (bool feeSuccess, ) = feeRecipient.call{value: feeAmount}("");
-        if (!feeSuccess) revert TransferFailed();
+        payable(feeRecipient).sendValue(feeAmount);
 
         // 借り手への送金
-        (bool success, ) = loan.borrower.call{value: amountToBorrower}("");
-        if (!success) revert TransferFailed();
+        loan.borrower.sendValue(amountToBorrower);
 
         emit LoanFunded(loanId, msg.sender);
     }
@@ -348,13 +349,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         }
 
         // 貸し手への送金
-        (bool success, ) = loan.lender.call{value: amount}("");
-        if (!success) revert TransferFailed();
+        loan.lender.sendValue(amount);
 
         // 余剰分を借り手に返却
         if (excessAmount > 0) {
-            (bool excessSuccess, ) = loan.borrower.call{value: excessAmount}("");
-            if (!excessSuccess) revert TransferFailed();
+            loan.borrower.sendValue(excessAmount);
         }
     }
 
@@ -420,9 +419,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             uint256 updatedAt,
             uint80 answeredInRound
         ) = priceFeed.latestRoundData();
-        
+
         // 価格データの検証
         if (price <= 0) revert InvalidPriceData();
+        if (startedAt == 0 || updatedAt == 0 || updatedAt < startedAt) revert InvalidPriceData();
         if (updatedAt < block.timestamp - PRICE_FEED_TIMEOUT) revert StaleData();
         if (answeredInRound < roundId) revert StaleData();
 
@@ -444,6 +444,45 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param borrower The address of the borrower
      * @return Array of loan IDs
      */
+    function getBorrowerLoans(address borrower) external view returns (uint256[] memory) {
+        // 実際のアクティブローン数をカウント
+        uint256 activeCount = 0;
+        for (uint256 i = 0; i < loanCount; i++) {
+            if (loans[i].borrower == borrower && 
+                (loans[i].state == LoanState.Requested || loans[i].state == LoanState.Funded)) {
+                activeCount++;
+            }
+        }
+        
+        // 正確なサイズの配列を作成
+        uint256[] memory borrowerLoans = new uint256[](activeCount);
+        uint256 counter = 0;
+        
+        for (uint256 i = 0; i < loanCount && counter < activeCount; i++) {
+            if (loans[i].borrower == borrower && 
+                (loans[i].state == LoanState.Requested || loans[i].state == LoanState.Funded)) {
+                borrowerLoans[counter] = i;
+                counter++;
+            }
+        }
+        
+        return borrowerLoans;
+    }
+
+    // 現在の担保率(BASIS_POINTS=10000)を取得する関数
+    function getCollateralizationRatio(uint256 loanId) external view validLoanId(loanId) returns (uint256) {
+        Loan storage loan = loans[loanId];
+        if (loan.state != LoanState.Funded) revert InvalidLoanState();
+
+        uint256 collateralValue = getCollateralValueInETH(loan.collateralToken, loan.collateralAmount);
+        if (loan.remainingRepaymentAmount == 0) {
+            return type(uint256).max;
+        }
+        return collateralValue * BASIS_POINTS / loan.remainingRepaymentAmount;
+    }
+
+    // 借り手のローン情報を取得する関数（ガス最適化版）
+>>>>>>> main
     function getBorrowerLoans(address borrower) external view returns (uint256[] memory) {
         // 実際のアクティブローン数をカウント
         uint256 activeCount = 0;
@@ -548,5 +587,17 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         }
         
         return (totalLoans, activeLoans, repaidLoans, defaultedLoans, cancelledLoans);
+    }
+
+    // 緊急時にトークンを回収する関数（管理者用）
+    function rescueTokens(address token, uint256 amount, address to) external onlyOwner {
+        if (to == address(0)) revert InvalidAddress();
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    // 緊急時にETHを回収する関数（管理者用）
+    function rescueETH(uint256 amount, address to) external onlyOwner {
+        if (to == address(0)) revert InvalidAddress();
+        payable(to).sendValue(amount);
     }
 }
