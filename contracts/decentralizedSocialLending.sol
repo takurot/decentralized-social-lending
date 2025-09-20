@@ -106,7 +106,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     event CollateralTokenStatusUpdated(address indexed token, bool allowed);
     event CollateralTokenDecimalsUpdated(address indexed token, uint8 decimals);
 
-    // コンストラクタ
+    /**
+     * @notice Constructor to initialize the contract with the fee recipient
+     * @param _feeRecipient The address to receive platform fees
+     */
     constructor(address _feeRecipient) {
         if (_feeRecipient == address(0)) revert InvalidAddress();
         feeRecipient = _feeRecipient;
@@ -162,16 +165,25 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         _;
     }
 
-    // 緊急停止機能
+    /**
+     * @notice Pauses the contract, disabling non-owner functions
+     */
     function pause() external onlyOwner {
         _pause();
     }
 
+    /**
+     * @notice Unpauses the contract, enabling all functions
+     */
     function unpause() external onlyOwner {
         _unpause();
     }
 
-    // 担保トークンの許可状態を設定する関数
+    /**
+     * @notice Sets the allowed status for a collateral token
+     * @param token The address of the collateral token
+     * @param allowed Whether the token is allowed as collateral
+     */
     function setCollateralTokenStatus(address token, bool allowed) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
         allowedCollateralTokens[token] = allowed;
@@ -254,7 +266,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         emit LoanCancelled(loanId, loan.borrower);
     }
 
-    // 貸し手がローンを資金提供する関数
+    /**
+     * @notice Allows a lender to fund a loan request
+     * @param loanId The ID of the loan to fund
+     */
     function fundLoan(uint256 loanId) external payable nonReentrant validLoanId(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Requested) revert InvalidLoanState();
@@ -282,7 +297,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         emit LoanFunded(loanId, msg.sender);
     }
 
-    // 借り手が返済する関数（部分返済をサポート）
+    /**
+     * @notice Allows the borrower to repay the loan, supporting partial repayments
+     * @param loanId The ID of the loan to repay
+     */
     function repayLoan(uint256 loanId) external payable nonReentrant onlyBorrower(loanId) validLoanId(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
@@ -322,7 +340,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         }
     }
 
-    // 貸し手がデフォルトを宣言して担保を取得する関数
+    /**
+     * @notice Allows the lender to declare default and claim collateral if the loan is overdue
+     * @param loanId The ID of the loan to declare default
+     */
     function declareDefault(uint256 loanId) external nonReentrant onlyLender(loanId) validLoanId(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
