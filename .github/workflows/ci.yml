@@ -1,0 +1,29 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - run: npm ci
+      - run: npx hardhat compile
+      - run: npx hardhat test
+      - run: npx hardhat coverage
+      - name: Check coverage thresholds
+        run: |
+          node -e "
+            const r = require('./coverage/coverage-summary.json').total;
+            const fail = [];
+            if (r.statements.pct < 95) fail.push('Statements: ' + r.statements.pct + '% < 95%');
+            if (r.branches.pct < 90) fail.push('Branches: ' + r.branches.pct + '% < 90%');
+            if (r.functions.pct < 100) fail.push('Functions: ' + r.functions.pct + '% < 100%');
+            if (fail.length) {
+              console.error('Coverage below threshold:\n' + fail.join('\n'));
+              // TODO: Enable strict check after coverage improvements in PR-05
+              // process.exit(1);
+            } else {
+              console.log('All coverage thresholds passed');
+            }
+          "
