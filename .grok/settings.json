@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "PreToolUse": [],
+    "PostToolUse": [],
+    "UserPromptSubmit": []
+  },
+  "permissions": {
+    "mode": "ask",
+    "allowedTools": [],
+    "disallowedTools": []
+  },
+  "mcp": {
+    "servers": {}
+  },
+  "memory": {
+    "autoLoad": true,
+    "maxDepth": 5,
+    "excludePatterns": [
+      "node_modules/**",
+      ".git/**",
+      "dist/**"
+    ]
+  }
+}
