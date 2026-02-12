@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.24;
 
 // OpenZeppelinのライブラリをインポート
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -481,32 +481,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         return collateralValue * BASIS_POINTS / loan.remainingRepaymentAmount;
     }
 
-    // 借り手のローン情報を取得する関数（ガス最適化版）
->>>>>>> main
-    function getBorrowerLoans(address borrower) external view returns (uint256[] memory) {
-        // 実際のアクティブローン数をカウント
-        uint256 activeCount = 0;
-        for (uint256 i = 0; i < loanCount; i++) {
-            if (loans[i].borrower == borrower && 
-                (loans[i].state == LoanState.Requested || loans[i].state == LoanState.Funded)) {
-                activeCount++;
-            }
-        }
-        
-        // 正確なサイズの配列を作成
-        uint256[] memory borrowerLoans = new uint256[](activeCount);
-        uint256 counter = 0;
-        
-        for (uint256 i = 0; i < loanCount && counter < activeCount; i++) {
-            if (loans[i].borrower == borrower && 
-                (loans[i].state == LoanState.Requested || loans[i].state == LoanState.Funded)) {
-                borrowerLoans[counter] = i;
-                counter++;
-            }
-        }
-        
-        return borrowerLoans;
-    }
+
 
     /**
      * @notice Gets the list of funded loan IDs for a lender
