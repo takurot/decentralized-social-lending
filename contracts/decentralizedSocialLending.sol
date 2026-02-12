@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Chainlinkのオラクルインターフェースをインポート
 import "./interfaces/AggregatorV3Interface.sol";
@@ -31,6 +32,9 @@ error InvalidAddress();
 error InvalidLoanId();
 error InvalidParameter();
 error Unauthorized();
+error TooManyActiveLoans();
+error LoanTooLarge();
+error InsufficientUnlockedCollateral();
 
 contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     using SafeERC20 for IERC20;
@@ -82,8 +86,18 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     uint256 public platformFee = 100; // 1%
     address public feeRecipient;
 
-    // ローン・トゥ・バリュー（LTV）比率（例: 5000で50%）
-    uint256 public ltvRatio = 5000;
+    // 担保トークンごとのロック済み残高
+    mapping(address => uint256) public lockedCollateral;
+
+    // 借入制限
+    uint256 public maxLoanAmount = 10 ether;
+    uint256 public maxActiveLoansPerBorrower = 3;
+
+    // 担保率（Collateral Ratio）（例: 15000で150%）
+    // 旧: ltvRatio
+    uint256 public collateralRatio = 15000;
+    uint256 public constant MIN_COLLATERAL_RATIO = 10000; // 100%
+    uint256 public constant MAX_COLLATERAL_RATIO = 20000; // 200%
 
     // イベントの定義
     event LoanRequested(
@@ -103,7 +117,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     event PriceFeedUpdated(address indexed token, address indexed priceFeed);
     event PlatformFeeUpdated(uint256 newFee);
     event FeeRecipientUpdated(address indexed newRecipient);
-    event LTVRatioUpdated(uint256 newRatio);
+    event CollateralRatioUpdated(uint256 newRatio);
     event CollateralTokenStatusUpdated(address indexed token, bool allowed);
     event CollateralTokenDecimalsUpdated(address indexed token, uint8 decimals);
 
@@ -116,6 +130,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         feeRecipient = _feeRecipient;
         _transferOwnership(msg.sender);
     }
+
+    /**
+     * @notice Allows the contract to receive ETH
+     */
+    receive() external payable {}
 
     ///// コントラクト動作説明用のコメント追加 /////
     /*
@@ -236,18 +255,25 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (collateralToken == address(0)) revert InvalidAddress();
         if (!allowedCollateralTokens[collateralToken]) revert TokenNotAllowed();
 
+        if (amount > maxLoanAmount) revert LoanTooLarge();
+        if (borrowerActiveLoans[msg.sender] >= maxActiveLoansPerBorrower) revert TooManyActiveLoans();
+
         // 担保価値の評価
         uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, collateralAmount);
-        uint256 requiredCollateralValueInETH = amount * ltvRatio / BASIS_POINTS;
+        
+        // collateralRatio = 15000 → ローン額の150%の担保価値が必要
+        uint256 requiredCollateralValueInETH = amount * collateralRatio / BASIS_POINTS;
         if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
 
         // 担保のデポジット
         IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
+        lockedCollateral[collateralToken] += collateralAmount;
 
         uint256 loanId = loanCount++;
 
-        // 単利による返済総額の計算（オーバーフロー防止のため計算順序を変更）
-        uint256 interestAmount = amount * interestRate * duration / SECONDS_PER_YEAR / BASIS_POINTS;
+        // 単利による返済総額の計算（Math.mulDivを使用）
+        uint256 annualInterest = Math.mulDiv(amount, interestRate, BASIS_POINTS);
+        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
         uint256 repaymentAmount = amount + interestAmount;
 
         loans[loanId] = Loan({
@@ -282,6 +308,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         borrowerActiveLoans[loan.borrower]--;
 
         // 担保の返却
+        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
         IERC20(loan.collateralToken).safeTransfer(loan.borrower, loan.collateralAmount);
 
         emit LoanCancelled(loanId, loan.borrower);
@@ -339,6 +366,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             lenderActiveLoans[loan.lender]--;
 
             // 担保の返却
+            lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
             IERC20(loan.collateralToken).safeTransfer(loan.borrower, loan.collateralAmount);
 
             emit LoanRepaid(loanId, loan.borrower, loan.lender, amount);
@@ -373,6 +401,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         lenderActiveLoans[loan.lender]--;
 
         // 担保の貸し手への移転
+        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
         IERC20(loan.collateralToken).safeTransfer(loan.lender, loan.collateralAmount);
 
         emit DefaultDeclared(loanId, loan.lender);
@@ -394,6 +423,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         lenderActiveLoans[loan.lender]--;
 
         // 担保の貸し手への移転
+        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
         IERC20(loan.collateralToken).safeTransfer(loan.lender, loan.collateralAmount);
 
         emit DefaultDeclared(loanId, loan.lender);
@@ -525,11 +555,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         emit FeeRecipientUpdated(_feeRecipient);
     }
 
-    // LTV比率を設定する関数（管理者用）
-    function setLTVRatio(uint256 _ltvRatio) external onlyOwner {
-        if (_ltvRatio > BASIS_POINTS) revert InvalidParameter();
-        ltvRatio = _ltvRatio;
-        emit LTVRatioUpdated(_ltvRatio);
+    // 担保率（Collateral Ratio）を設定する関数（管理者用）
+    function setCollateralRatio(uint256 _collateralRatio) external onlyOwner {
+        if (_collateralRatio < MIN_COLLATERAL_RATIO || _collateralRatio > MAX_COLLATERAL_RATIO) revert InvalidParameter();
+        collateralRatio = _collateralRatio;
+        emit CollateralRatioUpdated(_collateralRatio);
     }
 
     /**
@@ -567,6 +597,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     // 緊急時にトークンを回収する関数（管理者用）
     function rescueTokens(address token, uint256 amount, address to) external onlyOwner {
         if (to == address(0)) revert InvalidAddress();
+        uint256 contractBalance = IERC20(token).balanceOf(address(this));
+        uint256 locked = lockedCollateral[token];
+        if (contractBalance < locked + amount) revert InsufficientUnlockedCollateral();
         IERC20(token).safeTransfer(to, amount);
     }
 
