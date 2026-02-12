@@ -54,9 +54,9 @@ npx hardhat test      # 既存テスト全パス
 ```
 
 ### 完了条件
-- [ ] コンパイル成功
-- [ ] 既存テスト全パス
-- [ ] 重複ファイルが削除されていること
+- [x] コンパイル成功
+- [x] 既存テスト全パス
+- [x] 重複ファイルが削除されていること
 
 ---
 
@@ -106,10 +106,10 @@ jobs:
 > Coverage 閾値チェックは `coverage-summary.json` を解析して Statements ≥ 95% / Branches ≥ 90% / Functions = 100% を強制する。閾値未達は CI を fail にする。
 
 ### 完了条件
-- [ ] CI が GitHub Actions で正常に動作
+- [x] CI が GitHub Actions で正常に動作
 - [ ] Coverage 閾値チェックステップが機能している
-- [ ] `.env.example` が存在
-- [ ] PR-02 以降の全 PR で CI が自動実行される
+- [x] `.env.example` が存在
+- [x] PR-02 以降の全 PR で CI が自動実行される
 
 ---
 

@@ -41,7 +41,7 @@ describe("SocialLendingWithCollateral", function () {
     it("担保トークンが正しく設定されていること", async function () {
       const tokenAddress = await mockToken.getAddress();
       const priceFeedAddress = await mockPriceFeed.getAddress();
-      
+
       expect(await socialLending.allowedCollateralTokens(tokenAddress)).to.equal(true);
       expect(await socialLending.collateralTokenDecimals(tokenAddress)).to.equal(18);
       expect(await socialLending.priceFeeds(tokenAddress)).to.equal(priceFeedAddress);
@@ -96,7 +96,7 @@ describe("SocialLendingWithCollateral", function () {
       const loanAmount = ethers.parseEther("1");
       const interestRate = 500; // 5%
       const duration = 30 * 24 * 60 * 60; // 30日
-      const collateralAmount = ethers.parseEther("0.001"); // 0.001トークン = 2 ETH (LTV 50%で十分)
+      const collateralAmount = ethers.parseEther("0.001"); // 0.001トークン = 2 ETH (Collateral Ratio 150%で十分)
       const tokenAddress = await mockToken.getAddress();
 
       await expect(
@@ -126,7 +126,7 @@ describe("SocialLendingWithCollateral", function () {
       const loanAmount = ethers.parseEther("10");
       const interestRate = 500; // 5%
       const duration = 30 * 24 * 60 * 60; // 30日
-      const collateralAmount = ethers.parseEther("0.001"); // 0.001トークン = 2 ETH (LTV 50%で不足)
+      const collateralAmount = ethers.parseEther("0.001"); // 0.001トークン = 2 ETH (Collateral Ratio 150%で不足)
       const tokenAddress = await mockToken.getAddress();
 
       await expect(
@@ -165,7 +165,7 @@ describe("SocialLendingWithCollateral", function () {
     it("貸し手がローンに資金提供できること", async function () {
       const loanId = 0;
       const loan = await socialLending.loans(loanId);
-      
+
       await expect(
         socialLending.connect(lender).fundLoan(loanId, { value: loan.principalAmount })
       )
@@ -314,7 +314,7 @@ describe("SocialLendingWithCollateral", function () {
 
     it("期限切れ後に貸し手がデフォルトを宣言できること", async function () {
       const loanId = 0;
-      
+
       // 時間を進める
       await ethers.provider.send("evm_increaseTime", [31 * 24 * 60 * 60]); // 31日
       await ethers.provider.send("evm_mine");
@@ -332,7 +332,7 @@ describe("SocialLendingWithCollateral", function () {
 
     it("期限前にデフォルト宣言が失敗すること", async function () {
       const loanId = 0;
-      
+
       await expect(
         socialLending.connect(lender).declareDefault(loanId)
       ).to.be.revertedWithCustomError(socialLending, "LoanNotExpired");
