@@ -46,6 +46,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     uint256 public constant MAX_PLATFORM_FEE = 500;  // 5%
     uint256 public constant SECONDS_PER_YEAR = 365 days;
     uint256 public constant PRICE_FEED_TIMEOUT = 1 hours; // 価格フィードの有効期限
+    uint256 public constant MAX_LOAN_DURATION = 365 days; // ローン期間の上限
 
     // ローンの状態を表す列挙型
     enum LoanState { Requested, Funded, Repaid, Defaulted, Cancelled }
@@ -250,7 +251,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     ) external nonReentrant whenNotPaused {
         if (amount == 0) revert InvalidAmount();
         if (interestRate == 0 || interestRate > MAX_INTEREST_RATE) revert InvalidInterestRate();
-        if (duration == 0) revert InvalidDuration();
+        if (duration == 0 || duration > MAX_LOAN_DURATION) revert InvalidDuration();
         if (collateralAmount == 0) revert InvalidCollateral();
         if (collateralToken == address(0)) revert InvalidAddress();
         if (!allowedCollateralTokens[collateralToken]) revert TokenNotAllowed();
@@ -596,7 +597,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     // 緊急時にトークンを回収する関数（管理者用）
     function rescueTokens(address token, uint256 amount, address to) external onlyOwner {
-        if (to == address(0)) revert InvalidAddress();
+        if (token == address(0) || to == address(0)) revert InvalidAddress();
         uint256 contractBalance = IERC20(token).balanceOf(address(this));
         uint256 locked = lockedCollateral[token];
         if (contractBalance < locked + amount) revert InsufficientUnlockedCollateral();

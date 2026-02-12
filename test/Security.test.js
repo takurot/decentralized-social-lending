@@ -72,6 +72,22 @@ describe("SocialLendingWithCollateral Security", function () {
                 )
             ).to.be.revertedWithCustomError(socialLending, "TooManyActiveLoans");
         });
+
+        it("should revert if duration exceeds MAX_LOAN_DURATION", async function () {
+            const maxDuration = await socialLending.MAX_LOAN_DURATION();
+            const loanAmount = ethers.parseEther("1");
+            const collateralAmount = ethers.parseEther("10");
+
+            await expect(
+                socialLending.connect(borrower).requestLoan(
+                    loanAmount,
+                    500,
+                    maxDuration + 1n,
+                    await mockToken.getAddress(),
+                    collateralAmount
+                )
+            ).to.be.revertedWithCustomError(socialLending, "InvalidDuration");
+        });
     });
 
     describe("Locked Collateral Integrity", function () {
@@ -130,6 +146,16 @@ describe("SocialLendingWithCollateral Security", function () {
 
             const locked = await socialLending.lockedCollateral(await mockToken.getAddress());
             expect(locked).to.equal(0);
+        });
+
+        it("should revert rescueTokens if token address is 0", async function () {
+            await expect(
+                socialLending.connect(owner).rescueTokens(
+                    ethers.ZeroAddress,
+                    100,
+                    owner.address
+                )
+            ).to.be.revertedWithCustomError(socialLending, "InvalidAddress");
         });
     });
 
