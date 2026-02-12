@@ -15,6 +15,7 @@ jobs:
         run: |
           node -e "
             const r = require('./coverage/coverage-summary.json').total;
+            console.log(`Current Coverage: Statements ${r.statements.pct}%, Branches ${r.branches.pct}%, Functions ${r.functions.pct}%`);
             const fail = [];
             if (r.statements.pct < 95) fail.push('Statements: ' + r.statements.pct + '% < 95%');
             if (r.branches.pct < 90) fail.push('Branches: ' + r.branches.pct + '% < 90%');
