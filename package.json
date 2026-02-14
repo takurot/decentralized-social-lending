@@ -1,6 +1,6 @@
 {
   "name": "decentralized-social-lending",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "This repository provides a Solidity smart contract implementation for a collateral-backed social lending platform. This contract facilitates secure and efficient peer-to-peer lending between borrowers and lenders on the Ethereum network.",
   "main": "index.js",
   "directories": {

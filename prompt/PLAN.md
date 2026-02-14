@@ -189,9 +189,9 @@ npx hardhat coverage
 ```
 
 ### 完了条件
-- [ ] 全テストパス
-- [ ] Coverage: Statements ≥ 90%
-- [ ] CI グリーン
+- [x] 全テストパス
+- [x] Coverage: Statements ≥ 90%
+- [x] CI グリーン
 
 ---
 
