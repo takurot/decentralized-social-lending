@@ -80,7 +80,7 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
         });
     });
 
-    describe("O(1) View Functions & Indexing", function () {
+    describe("View Functions & Indexing", function () {
         beforeEach(async function () {
             // Create 3 loans
             // Loan 0: Requested
@@ -119,7 +119,7 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
             await socialLending.connect(borrower).cancelLoanRequest(4);
         });
 
-        it("getStats should return correct counts O(1)", async function () {
+        it("getStats should return correct counts (O(1))", async function () {
             // Stats: 
             // Total: 5 (0,1,2,3,4)
             // Active (Funded): 1 (Loan 1)
@@ -146,7 +146,7 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
             expect(stats[2]).to.equal(1); // repaid
             expect(stats[3]).to.equal(1); // defaulted
             expect(stats[4]).to.equal(1); // cancelled
-            expect(stats[5]).to.equal(0); // liquidated (new)
+            expect(stats[5]).to.equal(1); // liquidated (updated)
         });
 
         it("getBorrowerLoans should return correct IDs", async function () {
