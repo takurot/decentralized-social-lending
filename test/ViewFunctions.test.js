@@ -74,5 +74,6 @@ describe("SocialLendingWithCollateral View Functions", function () {
         expect(stats.repaidLoans).to.equal(1);
         expect(stats.cancelledLoans).to.equal(1);
         expect(stats.defaultedLoans).to.equal(0);
+        expect(stats.liquidatedLoans).to.equal(0);
     });
 });

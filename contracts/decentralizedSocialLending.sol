@@ -53,22 +53,50 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     // ローンの構造体
     struct Loan {
+        // Slot 1: borrower (20) + state (1) + interestRate (2) = 23 bytes
         address payable borrower;
+        LoanState state;         // ローンの状態 (1 byte)
+        uint16 interestRate;     // 利率 (2 bytes)
+        
+        // Slot 2: lender (20)
         address payable lender;
-        uint256 principalAmount; // 元本
-        uint256 interestRate;    // 利率（ベーシスポイント、例: 500で5%）
-        uint256 repaymentAmount; // 返済総額
-        uint256 duration;        // 期間（秒）
-        uint256 startTime;       // 開始時刻
-        LoanState state;         // ローンの状態
+
+        // Slot 3
         address collateralToken; // 担保トークンのアドレス
+
+        // Slot 4
+        uint256 principalAmount; // 元本
+
+        // Slot 5
+        uint256 repaymentAmount; // 返済総額
+
+        // Slot 6
+        uint256 duration;        // 期間（秒）
+
+        // Slot 7
+        uint256 startTime;       // 開始時刻
+
+        // Slot 8
         uint256 collateralAmount;// 担保数量
+
+        // Slot 9
         uint256 remainingRepaymentAmount; // 残りの返済額
     }
 
     // ローンIDからローン情報へのマッピング
     mapping(uint256 => Loan) public loans;
     uint256 public loanCount;
+
+    // ユーザー別ローンIDインデックス (Gas Optimization)
+    mapping(address => uint256[]) private _borrowerLoanIds;
+    mapping(address => uint256[]) private _lenderLoanIds;
+
+    // 統計カウンタ (Gas Optimization)
+    uint256 public activeLoansCount;
+    uint256 public repaidLoansCount;
+    uint256 public defaultedLoansCount;
+    uint256 public cancelledLoansCount;
+    uint256 public liquidatedLoansCount;
 
     // ユーザーのアクティブローン数追跡
     mapping(address => uint256) public borrowerActiveLoans;
@@ -122,6 +150,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     event CollateralTokenStatusUpdated(address indexed token, bool allowed);
     event CollateralTokenDecimalsUpdated(address indexed token, uint8 decimals);
 
+    event MaxActiveLoansPerBorrowerUpdated(uint256 newMax);
+    event MaxLoanAmountUpdated(uint256 newMaxAmount);
+
     /**
      * @notice Constructor to initialize the contract with the fee recipient
      * @param _feeRecipient The address to receive platform fees
@@ -130,6 +161,20 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (_feeRecipient == address(0)) revert InvalidAddress();
         feeRecipient = _feeRecipient;
         _transferOwnership(msg.sender);
+    }
+    
+    // ... (existing code for setCollateralRatio etc)
+
+    function setMaxActiveLoansPerBorrower(uint256 _max) external onlyOwner {
+        if (_max == 0) revert InvalidParameter();
+        maxActiveLoansPerBorrower = _max;
+        emit MaxActiveLoansPerBorrowerUpdated(_max);
+    }
+
+    function setMaxLoanAmount(uint256 _maxLoanAmount) external onlyOwner {
+        if (_maxLoanAmount == 0) revert InvalidParameter();
+        maxLoanAmount = _maxLoanAmount;
+        emit MaxLoanAmountUpdated(_maxLoanAmount);
     }
 
     /**
@@ -281,7 +326,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             borrower: payable(msg.sender),
             lender: payable(address(0)),
             principalAmount: amount,
-            interestRate: interestRate,
+            interestRate: uint16(interestRate),
             repaymentAmount: repaymentAmount,
             duration: duration,
             startTime: 0,
@@ -292,6 +337,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         });
 
         borrowerActiveLoans[msg.sender]++;
+        _borrowerLoanIds[msg.sender].push(loanId);
 
         emit LoanRequested(loanId, msg.sender, amount, interestRate, duration, collateralToken, collateralAmount);
     }
@@ -300,13 +346,14 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @notice Allows the borrower to cancel a loan request before it is funded
      * @param loanId The ID of the loan to cancel
      */
-    function cancelLoanRequest(uint256 loanId) external nonReentrant onlyBorrower(loanId) validLoanId(loanId) whenNotPaused {
+    function cancelLoanRequest(uint256 loanId) external nonReentrant validLoanId(loanId) onlyBorrower(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Requested) revert InvalidLoanState();
 
         // 状態変更を先に行う（再入攻撃対策）
         loan.state = LoanState.Cancelled;
         borrowerActiveLoans[loan.borrower]--;
+        cancelledLoansCount++;
 
         // 担保の返却
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
@@ -330,6 +377,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         loan.startTime = block.timestamp;
         loan.state = LoanState.Funded;
         lenderActiveLoans[msg.sender]++;
+        
+        activeLoansCount++;
+        _lenderLoanIds[msg.sender].push(loanId);
 
         // プラットフォーム手数料の計算と送金
         uint256 feeAmount = msg.value * platformFee / BASIS_POINTS;
@@ -348,7 +398,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @notice Allows the borrower to repay the loan, supporting partial repayments
      * @param loanId The ID of the loan to repay
      */
-    function repayLoan(uint256 loanId) external payable nonReentrant onlyBorrower(loanId) validLoanId(loanId) whenNotPaused {
+    function repayLoan(uint256 loanId) external payable nonReentrant validLoanId(loanId) onlyBorrower(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
         if (msg.value == 0) revert InvalidAmount();
@@ -365,6 +415,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             loan.state = LoanState.Repaid;
             borrowerActiveLoans[loan.borrower]--;
             lenderActiveLoans[loan.lender]--;
+            
+            activeLoansCount--;
+            repaidLoansCount++;
 
             // 担保の返却
             lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
@@ -390,7 +443,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @notice Allows the lender to declare default and claim collateral if the loan is overdue
      * @param loanId The ID of the loan to declare default
      */
-    function declareDefault(uint256 loanId) external nonReentrant onlyLender(loanId) validLoanId(loanId) whenNotPaused {
+    function declareDefault(uint256 loanId) external nonReentrant validLoanId(loanId) onlyLender(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
         if (block.timestamp <= loan.startTime + loan.duration) revert LoanNotExpired();
@@ -400,6 +453,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         loan.state = LoanState.Defaulted;
         borrowerActiveLoans[loan.borrower]--;
         lenderActiveLoans[loan.lender]--;
+        
+        activeLoansCount--;
+        defaultedLoansCount++;
 
         // 担保の貸し手への移転
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
@@ -422,6 +478,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         loan.state = LoanState.Defaulted;
         borrowerActiveLoans[loan.borrower]--;
         lenderActiveLoans[loan.lender]--;
+
+        activeLoansCount--;
+        defaultedLoansCount++;
 
         // 担保の貸し手への移転
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
@@ -476,28 +535,30 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @return Array of loan IDs
      */
     function getBorrowerLoans(address borrower) external view returns (uint256[] memory) {
-        // 実際のアクティブローン数をカウント
+        uint256[] storage allLoanIds = _borrowerLoanIds[borrower];
         uint256 activeCount = 0;
-        for (uint256 i = 0; i < loanCount; i++) {
-            if (loans[i].borrower == borrower && 
-                (loans[i].state == LoanState.Requested || loans[i].state == LoanState.Funded)) {
+        
+        // ファーストパス: カウント
+        for (uint256 i = 0; i < allLoanIds.length; i++) {
+            LoanState state = loans[allLoanIds[i]].state;
+            if (state == LoanState.Requested || state == LoanState.Funded) {
                 activeCount++;
             }
         }
         
-        // 正確なサイズの配列を作成
-        uint256[] memory borrowerLoans = new uint256[](activeCount);
+        uint256[] memory activeLoanIds = new uint256[](activeCount);
         uint256 counter = 0;
         
-        for (uint256 i = 0; i < loanCount && counter < activeCount; i++) {
-            if (loans[i].borrower == borrower && 
-                (loans[i].state == LoanState.Requested || loans[i].state == LoanState.Funded)) {
-                borrowerLoans[counter] = i;
+        // セカンドパス: 充填
+        for (uint256 i = 0; i < allLoanIds.length; i++) {
+            LoanState state = loans[allLoanIds[i]].state;
+            if (state == LoanState.Requested || state == LoanState.Funded) {
+                activeLoanIds[counter] = allLoanIds[i];
                 counter++;
             }
         }
         
-        return borrowerLoans;
+        return activeLoanIds;
     }
 
     // 現在の担保率(BASIS_POINTS=10000)を取得する関数
@@ -512,34 +573,34 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         return collateralValue * BASIS_POINTS / loan.remainingRepaymentAmount;
     }
 
-
-
     /**
      * @notice Gets the list of funded loan IDs for a lender
      * @param lender The address of the lender
      * @return Array of loan IDs
      */
     function getLenderLoans(address lender) external view returns (uint256[] memory) {
-        // 実際のアクティブローン数をカウント
+        uint256[] storage allLoanIds = _lenderLoanIds[lender];
         uint256 activeCount = 0;
-        for (uint256 i = 0; i < loanCount; i++) {
-            if (loans[i].lender == lender && loans[i].state == LoanState.Funded) {
+        
+        // ファーストパス: カウント
+        for (uint256 i = 0; i < allLoanIds.length; i++) {
+            if (loans[allLoanIds[i]].state == LoanState.Funded) {
                 activeCount++;
             }
         }
         
-        // 正確なサイズの配列を作成
-        uint256[] memory lenderLoans = new uint256[](activeCount);
+        uint256[] memory activeLoanIds = new uint256[](activeCount);
         uint256 counter = 0;
         
-        for (uint256 i = 0; i < loanCount && counter < activeCount; i++) {
-            if (loans[i].lender == lender && loans[i].state == LoanState.Funded) {
-                lenderLoans[counter] = i;
+        // セカンドパス: 充填
+        for (uint256 i = 0; i < allLoanIds.length; i++) {
+            if (loans[allLoanIds[i]].state == LoanState.Funded) {
+                activeLoanIds[counter] = allLoanIds[i];
                 counter++;
             }
         }
         
-        return lenderLoans;
+        return activeLoanIds;
     }
 
     // プラットフォーム手数料を設定する関数（管理者用）
@@ -570,29 +631,24 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @return repaidLoans Number of repaid loans
      * @return defaultedLoans Number of defaulted loans
      * @return cancelledLoans Number of cancelled loans
+     * @return liquidatedLoans Number of liquidated loans
      */
     function getStats() external view returns (
         uint256 totalLoans,
         uint256 activeLoans,
         uint256 repaidLoans,
         uint256 defaultedLoans,
-        uint256 cancelledLoans
+        uint256 cancelledLoans,
+        uint256 liquidatedLoans
     ) {
-        totalLoans = loanCount;
-        
-        for (uint256 i = 0; i < loanCount; i++) {
-            if (loans[i].state == LoanState.Funded) {
-                activeLoans++;
-            } else if (loans[i].state == LoanState.Repaid) {
-                repaidLoans++;
-            } else if (loans[i].state == LoanState.Defaulted) {
-                defaultedLoans++;
-            } else if (loans[i].state == LoanState.Cancelled) {
-                cancelledLoans++;
-            }
-        }
-        
-        return (totalLoans, activeLoans, repaidLoans, defaultedLoans, cancelledLoans);
+        return (
+            loanCount,
+            activeLoansCount,
+            repaidLoansCount,
+            defaultedLoansCount,
+            cancelledLoansCount,
+            liquidatedLoansCount
+        );
     }
 
     // 緊急時にトークンを回収する関数（管理者用）
