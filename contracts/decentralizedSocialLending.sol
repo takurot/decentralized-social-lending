@@ -608,7 +608,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
         if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
-        if (loan.remainingRepaymentAmount == 0) revert LoanAlreadyRepaid();
 
         // 状態変更を先に行う（再入攻撃対策）
         loan.state = LoanState.Defaulted;
@@ -638,7 +637,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
         if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
-        if (loan.remainingRepaymentAmount == 0) revert LoanAlreadyRepaid();
 
         // 状態変更を先に行う（再入攻撃対策）
         loan.state = LoanState.Defaulted;
@@ -783,9 +781,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
 
         uint256 collateralValue = getCollateralValueInETH(loan.collateralToken, loan.collateralAmount);
-        if (loan.remainingRepaymentAmount == 0) {
-            return type(uint256).max;
-        }
         return Math.mulDiv(collateralValue, BASIS_POINTS, loan.remainingRepaymentAmount);
     }
 
