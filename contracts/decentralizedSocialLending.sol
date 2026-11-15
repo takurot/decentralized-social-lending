@@ -388,6 +388,20 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      */
     function setPriceFeed(address token, address priceFeed) external onlyOwner {
         if (token == address(0) || priceFeed == address(0)) revert InvalidAddress();
+        if (priceFeed.code.length == 0) revert InvalidAddress();
+
+        AggregatorV3Interface feed = AggregatorV3Interface(priceFeed);
+        try feed.decimals() returns (uint8 feedDecimals) {
+            if (feedDecimals > 18) revert InvalidPriceData();
+        } catch {
+            revert InvalidPriceData();
+        }
+        try feed.latestRoundData() returns (uint80, int256 price, uint256, uint256, uint80) {
+            if (price <= 0) revert InvalidPriceData();
+        } catch {
+            revert InvalidPriceData();
+        }
+
         priceFeeds[token] = priceFeed;
         emit PriceFeedUpdated(token, priceFeed);
     }
@@ -736,6 +750,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (!collateralDecimalsSet[collateralToken]) revert TokenDecimalsNotSet();
 
         uint8 decimals = priceFeed.decimals();
+        if (decimals > 18) revert InvalidPriceData();
         uint8 tokenDecimals = collateralTokenDecimals[collateralToken];
 
         // Normalize collateral amount using token decimals and Math.mulDiv

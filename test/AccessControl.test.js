@@ -145,7 +145,9 @@ describe("Access Control", function () {
     });
 
     it("should allow owner to setPriceFeed", async function () {
-        const newFeed = otherUser.address; // Just a random address for test
+        const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+        const deployedFeed = await MockPriceFeed.deploy();
+        const newFeed = await deployedFeed.getAddress();
         await expect(socialLending.setPriceFeed(await mockToken.getAddress(), newFeed))
             .to.emit(socialLending, "PriceFeedUpdated")
             .withArgs(await mockToken.getAddress(), newFeed);
