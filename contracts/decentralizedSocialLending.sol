@@ -1085,8 +1085,13 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             revert TokenNotAllowed();
         }
 
+        uint256 balanceBefore = IERC20(collateralToken).balanceOf(address(this));
+        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
+        uint256 actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
+        if (actualCollateral == 0) revert InvalidCollateral();
+
         {
-            uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, collateralAmount);
+            uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
             uint256 effectiveRatio = offer.minCollateralRatio > collateralRatio
                 ? offer.minCollateralRatio
                 : collateralRatio;
@@ -1094,8 +1099,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
         }
 
-        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
-        lockedCollateral[collateralToken] += collateralAmount;
+        lockedCollateral[collateralToken] += actualCollateral;
 
         offer.state = OfferState.Accepted;
         uint256 principal = offer.principalAmount;
@@ -1117,7 +1121,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
                 startTime: block.timestamp,
                 state: LoanState.Funded,
                 collateralToken: collateralToken,
-                collateralAmount: collateralAmount,
+                collateralAmount: actualCollateral,
                 remainingRepaymentAmount: repaymentAmount
             });
         }

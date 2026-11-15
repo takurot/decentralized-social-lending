@@ -291,6 +291,67 @@ describe("SocialLendingWithCollateral Security", function () {
                 )
             ).to.be.revertedWithCustomError(socialLending, "InvalidCollateral");
         });
+
+        it("should track actual received collateral in acceptLoanOffer through repay and default", async function () {
+            const loanAmount = ethers.parseEther("1");
+            const sentCollateral = ethers.parseEther("2");
+            const expectedReceived = ethers.parseEther("1.9");
+
+            await socialLending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, feeTokenAddr, 15000, {
+                value: loanAmount
+            });
+            await socialLending.connect(borrower).acceptLoanOffer(0, 500, 30 * 86400, feeTokenAddr, sentCollateral);
+
+            const loan = await socialLending.loans(0);
+            expect(loan.collateralAmount).to.equal(expectedReceived);
+            expect(await socialLending.lockedCollateral(feeTokenAddr)).to.equal(expectedReceived);
+
+            await socialLending.connect(borrower).repayLoan(0, { value: loan.remainingRepaymentAmount });
+            expect(await socialLending.lockedCollateral(feeTokenAddr)).to.equal(0);
+            expect(await feeToken.balanceOf(await socialLending.getAddress())).to.equal(0);
+
+            // Second offer: default path after duration + gracePeriod
+            await socialLending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, feeTokenAddr, 15000, {
+                value: loanAmount
+            });
+            await socialLending.connect(borrower).acceptLoanOffer(1, 500, 30 * 86400, feeTokenAddr, sentCollateral);
+
+            await ethers.provider.send("evm_increaseTime", [34 * 86400]);
+            await ethers.provider.send("evm_mine");
+            await socialLending.connect(lender).declareDefault(1);
+
+            expect(await socialLending.lockedCollateral(feeTokenAddr)).to.equal(0);
+            expect(await feeToken.balanceOf(await socialLending.getAddress())).to.equal(0);
+        });
+
+        it("should revert acceptLoanOffer with InsufficientCollateralValue on post-fee shortfall and InvalidCollateral on 100% fee", async function () {
+            const loanAmount = ethers.parseEther("1");
+            await socialLending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, feeTokenAddr, 15000, {
+                value: loanAmount
+            });
+
+            // 1.55 sent => 1.4725 received (< 1.5 required)
+            await expect(
+                socialLending.connect(borrower).acceptLoanOffer(0, 500, 30 * 86400, feeTokenAddr, ethers.parseEther("1.55"))
+            ).to.be.revertedWithCustomError(socialLending, "InsufficientCollateralValue");
+
+            const FeeTokenFactory = await ethers.getContractFactory("MockFeeOnTransferERC20");
+            const fullFeeToken = await FeeTokenFactory.deploy("Full Fee", "FF", 10000, owner.address);
+            const fullFeeAddr = await fullFeeToken.getAddress();
+
+            await socialLending.setCollateralTokenStatus(fullFeeAddr, true);
+            await socialLending.setCollateralTokenDecimals(fullFeeAddr, 18);
+            await socialLending.setPriceFeed(fullFeeAddr, await mockPriceFeed.getAddress());
+            await fullFeeToken.mint(borrower.address, ethers.parseEther("10"));
+            await fullFeeToken.connect(borrower).approve(await socialLending.getAddress(), ethers.parseEther("10"));
+
+            await socialLending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, fullFeeAddr, 15000, {
+                value: loanAmount
+            });
+            await expect(
+                socialLending.connect(borrower).acceptLoanOffer(1, 500, 30 * 86400, fullFeeAddr, ethers.parseEther("2"))
+            ).to.be.revertedWithCustomError(socialLending, "InvalidCollateral");
+        });
     });
 
     describe("Pull-Payment ETH Fallback & Rescue Protection (Issue #10)", function () {
