@@ -692,13 +692,13 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
 
         // Transfer ETH and collateral
-        loan.lender.sendValue(debtRepaid);
+        _safeTransferETHOrQueue(loan.lender, debtRepaid);
         IERC20(loan.collateralToken).safeTransfer(msg.sender, seizeAmount);
         if (surplusCollateral > 0) {
             IERC20(loan.collateralToken).safeTransfer(loan.borrower, surplusCollateral);
         }
         if (excessETH > 0) {
-            payable(msg.sender).sendValue(excessETH);
+            _safeTransferETHOrQueue(msg.sender, excessETH);
         }
 
         emit LoanLiquidated(loanId, msg.sender, seizeAmount, surplusCollateral, debtRepaid);
@@ -1057,7 +1057,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         offer.state = OfferState.Cancelled;
         lockedETH -= offer.principalAmount;
-        offer.lender.sendValue(offer.principalAmount);
+        _safeTransferETHOrQueue(offer.lender, offer.principalAmount);
         emit LoanOfferCancelled(offerId);
     }
 
@@ -1130,8 +1130,8 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         uint256 feeAmount = principal * platformFee / BASIS_POINTS;
         uint256 amountToBorrower = principal - feeAmount;
-        payable(feeRecipient).sendValue(feeAmount);
-        payable(msg.sender).sendValue(amountToBorrower);
+        _safeTransferETHOrQueue(feeRecipient, feeAmount);
+        _safeTransferETHOrQueue(msg.sender, amountToBorrower);
 
         emit LoanOfferAccepted(offerId, loanId, msg.sender);
     }
@@ -1146,7 +1146,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         offer.state = OfferState.Expired;
         lockedETH -= offer.principalAmount;
-        offer.lender.sendValue(offer.principalAmount);
+        _safeTransferETHOrQueue(offer.lender, offer.principalAmount);
         emit LoanOfferExpired(offerId);
     }
 
