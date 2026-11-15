@@ -183,4 +183,83 @@ describe("SocialLendingWithCollateral Security", function () {
             expect(loan.repaymentAmount).to.equal(expectedRepayment);
         });
     });
+
+    describe("Collateral Valuation, Decimals & Oracle Safety (Issue #9)", function () {
+        it("should require collateral covering principal + interest so initial ratio >= collateralRatio", async function () {
+            // 1 Token = 1 ETH
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
+            const loanAmount = ethers.parseEther("1");
+            const interestRate = 2000; // 20%
+            const duration = 365 * 86400; // 1 year => repaymentAmount = 1.2 ETH
+            // Required at 150% of 1.2 ETH = 1.8 ETH.
+            // 1.5 ETH (150% of principal only) should revert!
+            await expect(
+                socialLending.connect(borrower).requestLoan(
+                    loanAmount,
+                    interestRate,
+                    duration,
+                    await mockToken.getAddress(),
+                    ethers.parseEther("1.5")
+                )
+            ).to.be.revertedWithCustomError(socialLending, "InsufficientCollateralValue");
+
+            // Exact 1.8 ETH collateral should succeed and have getCollateralizationRatio >= 15000
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                interestRate,
+                duration,
+                await mockToken.getAddress(),
+                ethers.parseEther("1.8")
+            );
+            await socialLending.connect(lender).fundLoan(0, { value: loanAmount });
+            expect(await socialLending.getCollateralizationRatio(0)).to.be.gte(15000n);
+        });
+
+        it("should value 6-decimal, 8-decimal, and 0-decimal tokens accurately", async function () {
+            const MockERC20Factory = await ethers.getContractFactory("MockERC20");
+            const token6 = await MockERC20Factory.deploy("USDC", "USDC", 6);
+            const token8 = await MockERC20Factory.deploy("WBTC", "WBTC", 8);
+            const token0 = await MockERC20Factory.deploy("ZERO", "ZERO", 0);
+
+            const feedAddr = await mockPriceFeed.getAddress();
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("2", 8)); // 1 token = 2 ETH
+
+            for (const [tok, dec, amt] of [
+                [token6, 6, ethers.parseUnits("1", 6)],
+                [token8, 8, ethers.parseUnits("1", 8)],
+                [token0, 0, 1n],
+            ]) {
+                const addr = await tok.getAddress();
+                await socialLending.setCollateralTokenStatus(addr, true);
+                await socialLending.setPriceFeed(addr, feedAddr);
+                expect(await socialLending.collateralTokenDecimals(addr)).to.equal(dec);
+                expect(await socialLending.getCollateralValueInETH(addr, amt)).to.equal(ethers.parseEther("2"));
+            }
+        });
+
+        it("should revert with TokenDecimalsNotSet if token has no decimals() and decimals were not explicitly set", async function () {
+            const nonMetadataToken = lender.address; // EOA has no decimals()
+            await socialLending.setCollateralTokenStatus(nonMetadataToken, true);
+            await socialLending.setPriceFeed(nonMetadataToken, await mockPriceFeed.getAddress());
+
+            await expect(
+                socialLending.getCollateralValueInETH(nonMetadataToken, 100)
+            ).to.be.revertedWithCustomError(socialLending, "TokenDecimalsNotSet");
+        });
+
+        it("should revert with InvalidPriceData when updatedAt is in the future", async function () {
+            const now = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+            await mockPriceFeed.setPriceData(
+                ethers.parseUnits("2000", 8),
+                1n,
+                now,
+                now + 3600n,
+                1n
+            );
+
+            await expect(
+                socialLending.getCollateralValueInETH(await mockToken.getAddress(), ethers.parseEther("1"))
+            ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
+        });
+    });
 });

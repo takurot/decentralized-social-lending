@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 // OpenZeppelinのライブラリをインポート
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -35,6 +36,7 @@ error Unauthorized();
 error TooManyActiveLoans();
 error LoanTooLarge();
 error InsufficientUnlockedCollateral();
+error TokenDecimalsNotSet();
 
 contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     using SafeERC20 for IERC20;
@@ -107,6 +109,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     
     // 担保トークンのデシマル
     mapping(address => uint8) public collateralTokenDecimals;
+    mapping(address => bool) public collateralDecimalsSet;
 
     // オラクルのマッピング（担保トークンアドレス => プライスフィードアドレス）
     mapping(address => address) public priceFeeds;
@@ -253,6 +256,19 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function setCollateralTokenStatus(address token, bool allowed) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
         allowedCollateralTokens[token] = allowed;
+        if (allowed && !collateralDecimalsSet[token] && token.code.length > 0) {
+            (bool ok, bytes memory data) = token.staticcall(
+                abi.encodeWithSelector(IERC20Metadata.decimals.selector)
+            );
+            if (ok && data.length >= 32) {
+                uint256 dec = abi.decode(data, (uint256));
+                if (dec <= 18) {
+                    collateralTokenDecimals[token] = uint8(dec);
+                    collateralDecimalsSet[token] = true;
+                    emit CollateralTokenDecimalsUpdated(token, uint8(dec));
+                }
+            }
+        }
         emit CollateralTokenStatusUpdated(token, allowed);
     }
 
@@ -265,6 +281,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (token == address(0)) revert InvalidAddress();
         if (decimals > 18) revert InvalidParameter();
         collateralTokenDecimals[token] = decimals;
+        collateralDecimalsSet[token] = true;
         emit CollateralTokenDecimalsUpdated(token, decimals);
     }
 
@@ -304,11 +321,19 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (amount > maxLoanAmount) revert LoanTooLarge();
         if (borrowerActiveLoans[msg.sender] >= maxActiveLoansPerBorrower) revert TooManyActiveLoans();
 
-        // 担保価値の評価
+        // 単利による返済総額の計算（Math.mulDivを使用）
+        uint256 annualInterest = Math.mulDiv(amount, interestRate, BASIS_POINTS);
+        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
+        uint256 repaymentAmount = amount + interestAmount;
+
+        // 担保価値の評価（返済総額を基準に必要担保価値を計算）
         uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, collateralAmount);
-        
-        // collateralRatio = 15000 → ローン額の150%の担保価値が必要
-        uint256 requiredCollateralValueInETH = amount * collateralRatio / BASIS_POINTS;
+        uint256 requiredCollateralValueInETH = Math.mulDiv(
+            repaymentAmount,
+            collateralRatio,
+            BASIS_POINTS,
+            Math.Rounding.Up
+        );
         if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
 
         // 担保のデポジット
@@ -316,11 +341,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         lockedCollateral[collateralToken] += collateralAmount;
 
         uint256 loanId = loanCount++;
-
-        // 単利による返済総額の計算（Math.mulDivを使用）
-        uint256 annualInterest = Math.mulDiv(amount, interestRate, BASIS_POINTS);
-        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
-        uint256 repaymentAmount = amount + interestAmount;
 
         loans[loanId] = Loan({
             borrower: payable(msg.sender),
@@ -512,20 +532,20 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         // 価格データの検証
         if (price <= 0) revert InvalidPriceData();
-        if (startedAt == 0 || updatedAt == 0 || updatedAt < startedAt) revert InvalidPriceData();
-        if (updatedAt < block.timestamp - PRICE_FEED_TIMEOUT) revert StaleData();
+        if (startedAt == 0 || updatedAt == 0 || updatedAt < startedAt || updatedAt > block.timestamp) {
+            revert InvalidPriceData();
+        }
+        if (block.timestamp - updatedAt > PRICE_FEED_TIMEOUT) revert StaleData();
         if (answeredInRound < roundId) revert StaleData();
 
-        uint8 decimals = priceFeed.decimals();
-        
-        // 担保トークンのデシマルを考慮した計算
-        uint8 tokenDecimals = collateralTokenDecimals[collateralToken];
-        uint256 normalizedAmount = collateralAmount;
-        if (tokenDecimals > 0) {
-            normalizedAmount = collateralAmount * 10**18 / 10**uint256(tokenDecimals);
-        }
+        if (!collateralDecimalsSet[collateralToken]) revert TokenDecimalsNotSet();
 
-        uint256 collateralValueInETH = normalizedAmount * uint256(price) / 10**uint256(decimals);
+        uint8 decimals = priceFeed.decimals();
+        uint8 tokenDecimals = collateralTokenDecimals[collateralToken];
+
+        // 担保トークンのデシマルを考慮した計算（Math.mulDivを使用）
+        uint256 normalizedAmount = Math.mulDiv(collateralAmount, 1e18, 10 ** uint256(tokenDecimals));
+        uint256 collateralValueInETH = Math.mulDiv(normalizedAmount, uint256(price), 10 ** uint256(decimals));
         return collateralValueInETH;
     }
 
@@ -570,7 +590,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (loan.remainingRepaymentAmount == 0) {
             return type(uint256).max;
         }
-        return collateralValue * BASIS_POINTS / loan.remainingRepaymentAmount;
+        return Math.mulDiv(collateralValue, BASIS_POINTS, loan.remainingRepaymentAmount);
     }
 
     /**
