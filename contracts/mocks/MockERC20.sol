@@ -6,7 +6,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title MockERC20
- * @dev テスト用のERC20トークン
+ * @dev Mock ERC20 token for testing
  */
 contract MockERC20 is ERC20, Ownable {
     uint8 private _decimals;
@@ -17,7 +17,7 @@ contract MockERC20 is ERC20, Ownable {
         uint8 decimalsValue
     ) ERC20(name, symbol) {
         _decimals = decimalsValue;
-        // 初期供給量をオーナーに付与
+        // Mint initial supply to owner
         _mint(msg.sender, 1000000 * 10**decimalsValue);
     }
 

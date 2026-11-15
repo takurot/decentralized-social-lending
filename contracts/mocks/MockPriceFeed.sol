@@ -6,7 +6,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title MockPriceFeed
- * @dev テスト用のChainlinkプライスフィード
+ * @dev Mock Chainlink price feed for testing
  */
 contract MockPriceFeed is AggregatorV3Interface, Ownable {
     int256 private _price;
@@ -19,7 +19,7 @@ contract MockPriceFeed is AggregatorV3Interface, Ownable {
     uint80 private _answeredInRound;
 
     constructor() {
-        _price = 100000000; // $1.00 (8桁の小数点)
+        _price = 100000000; // $1.00 (8 decimals)
         _startedAt = block.timestamp;
         _updatedAt = block.timestamp;
         _answeredInRound = _roundId;
