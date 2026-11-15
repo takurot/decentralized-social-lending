@@ -100,5 +100,9 @@ describe("Edge Cases", function () {
         // Check state
         const loan = await socialLending.loans(loanId);
         expect(loan.state).to.equal(3); // Defaulted
+
+        const stats = await socialLending.getStats();
+        expect(stats.defaultedLoans).to.equal(1);
+        expect(stats.liquidatedLoans).to.equal(0);
     });
 });
