@@ -456,7 +456,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         
         activeLoansCount--;
         defaultedLoansCount++;
-        liquidatedLoansCount++;
 
         // 担保の貸し手への移転
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
@@ -482,7 +481,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         activeLoansCount--;
         defaultedLoansCount++;
-        liquidatedLoansCount++;
 
         // 担保の貸し手への移転
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
