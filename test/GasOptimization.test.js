@@ -99,8 +99,8 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
             // Loan 3: Defaulted (Manually Declared)
             await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, DURATION, await mockToken.getAddress(), COLLATERAL_AMOUNT);
             await socialLending.connect(lender).fundLoan(3, { value: LOAN_AMOUNT });
-            // Forward time
-            await ethers.provider.send("evm_increaseTime", [DURATION + 1]);
+            // Forward time past duration + 3-day grace period
+            await ethers.provider.send("evm_increaseTime", [DURATION + 3 * 86400 + 1]);
             await ethers.provider.send("evm_mine");
             await socialLending.connect(lender).declareDefault(3);
 

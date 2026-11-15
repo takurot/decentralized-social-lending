@@ -36,6 +36,8 @@ error Unauthorized();
 error TooManyActiveLoans();
 error LoanTooLarge();
 error InsufficientUnlockedCollateral();
+error CollateralSufficient();
+error NoDebtToLiquidate();
 error InsufficientUnlockedETH();
 error TokenDecimalsNotSet();
 
@@ -50,9 +52,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     uint256 public constant SECONDS_PER_YEAR = 365 days;
     uint256 public constant PRICE_FEED_TIMEOUT = 1 hours; // 価格フィードの有効期限
     uint256 public constant MAX_LOAN_DURATION = 365 days; // ローン期間の上限
+    uint256 public constant MAX_GRACE_PERIOD = 30 days; // 猶予期間の上限
 
     // ローンの状態を表す列挙型
-    enum LoanState { Requested, Funded, Repaid, Defaulted, Cancelled }
+    enum LoanState { Requested, Funded, Repaid, Defaulted, Cancelled, Liquidated }
 
     // ローンの構造体
     struct Loan {
@@ -136,6 +139,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     uint256 public constant MIN_COLLATERAL_RATIO = 10000; // 100%
     uint256 public constant MAX_COLLATERAL_RATIO = 20000; // 200%
 
+    // 猶予期間と清算パラメータ
+    uint256 public gracePeriod = 3 days;
+    uint256 public liquidationThreshold = 12000; // 120%
+    uint256 public liquidationBonus = 500;       // 5%
+
     // イベントの定義
     event LoanRequested(
         uint256 indexed loanId,
@@ -160,6 +168,15 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     event MaxActiveLoansPerBorrowerUpdated(uint256 newMax);
     event MaxLoanAmountUpdated(uint256 newMaxAmount);
+    event GracePeriodUpdated(uint256 newGracePeriod);
+    event LiquidationThresholdUpdated(uint256 newThreshold);
+    event LoanLiquidated(
+        uint256 indexed loanId,
+        address indexed liquidator,
+        uint256 collateralSeized,
+        uint256 collateralReturnedToBorrower,
+        uint256 debtRepaid
+    );
     event ETHWithdrawalQueued(address indexed recipient, uint256 amount);
     event ETHWithdrawn(address indexed recipient, uint256 amount);
     event TokensRescued(address indexed token, uint256 amount, address indexed to);
@@ -504,7 +521,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function declareDefault(uint256 loanId) external nonReentrant validLoanId(loanId) onlyLender(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
-        if (block.timestamp <= loan.startTime + loan.duration) revert LoanNotExpired();
+        if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
         if (loan.remainingRepaymentAmount == 0) revert LoanAlreadyRepaid();
 
         // 状態変更を先に行う（再入攻撃対策）
@@ -529,7 +546,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function checkAndDeclareDefault(uint256 loanId) external nonReentrant validLoanId(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
-        if (block.timestamp <= loan.startTime + loan.duration) revert LoanNotExpired();
+        if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
         if (loan.remainingRepaymentAmount == 0) revert LoanAlreadyRepaid();
 
         // 状態変更を先に行う（再入攻撃対策）
@@ -545,6 +562,51 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         IERC20(loan.collateralToken).safeTransfer(loan.lender, loan.collateralAmount);
 
         emit DefaultDeclared(loanId, loan.lender);
+    }
+
+    /**
+     * @notice Liquidates an undercollateralized funded loan
+     * @param loanId The ID of the loan to liquidate
+     */
+    function liquidate(uint256 loanId) external payable nonReentrant validLoanId(loanId) whenNotPaused {
+        Loan storage loan = loans[loanId];
+        if (loan.state != LoanState.Funded) revert InvalidLoanState();
+        if (loan.remainingRepaymentAmount == 0) revert NoDebtToLiquidate();
+
+        uint256 collateralValue = getCollateralValueInETH(loan.collateralToken, loan.collateralAmount);
+        uint256 ratio = Math.mulDiv(collateralValue, BASIS_POINTS, loan.remainingRepaymentAmount);
+        if (ratio >= liquidationThreshold) revert CollateralSufficient();
+
+        uint256 debtRepaid = loan.remainingRepaymentAmount;
+        if (msg.value < debtRepaid) revert InvalidAmount();
+
+        uint256 excessETH = msg.value - debtRepaid;
+        uint256 seizeValue = Math.mulDiv(debtRepaid, BASIS_POINTS + liquidationBonus, BASIS_POINTS);
+        uint256 seizeAmount = seizeValue >= collateralValue
+            ? loan.collateralAmount
+            : Math.mulDiv(loan.collateralAmount, seizeValue, collateralValue);
+        uint256 surplusCollateral = loan.collateralAmount - seizeAmount;
+
+        // 状態変更を先に行う（再入攻撃対策）
+        loan.remainingRepaymentAmount = 0;
+        loan.state = LoanState.Liquidated;
+        borrowerActiveLoans[loan.borrower]--;
+        lenderActiveLoans[loan.lender]--;
+        activeLoansCount--;
+        liquidatedLoansCount++;
+        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
+
+        // ETH・担保の移転
+        loan.lender.sendValue(debtRepaid);
+        IERC20(loan.collateralToken).safeTransfer(msg.sender, seizeAmount);
+        if (surplusCollateral > 0) {
+            IERC20(loan.collateralToken).safeTransfer(loan.borrower, surplusCollateral);
+        }
+        if (excessETH > 0) {
+            payable(msg.sender).sendValue(excessETH);
+        }
+
+        emit LoanLiquidated(loanId, msg.sender, seizeAmount, surplusCollateral, debtRepaid);
     }
 
     /**
@@ -677,9 +739,35 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     // 担保率（Collateral Ratio）を設定する関数（管理者用）
     function setCollateralRatio(uint256 _collateralRatio) external onlyOwner {
-        if (_collateralRatio < MIN_COLLATERAL_RATIO || _collateralRatio > MAX_COLLATERAL_RATIO) revert InvalidParameter();
+        if (
+            _collateralRatio < MIN_COLLATERAL_RATIO ||
+            _collateralRatio < liquidationThreshold ||
+            _collateralRatio > MAX_COLLATERAL_RATIO
+        ) revert InvalidParameter();
         collateralRatio = _collateralRatio;
         emit CollateralRatioUpdated(_collateralRatio);
+    }
+
+    /**
+     * @notice Sets the grace period before default can be declared
+     * @param _gracePeriod The grace period in seconds (max 30 days)
+     */
+    function setGracePeriod(uint256 _gracePeriod) external onlyOwner {
+        if (_gracePeriod > MAX_GRACE_PERIOD) revert InvalidParameter();
+        gracePeriod = _gracePeriod;
+        emit GracePeriodUpdated(_gracePeriod);
+    }
+
+    /**
+     * @notice Sets the liquidation threshold in basis points
+     * @param _threshold The new liquidation threshold
+     */
+    function setLiquidationThreshold(uint256 _threshold) external onlyOwner {
+        if (_threshold <= BASIS_POINTS + liquidationBonus || _threshold > collateralRatio) {
+            revert InvalidParameter();
+        }
+        liquidationThreshold = _threshold;
+        emit LiquidationThresholdUpdated(_threshold);
     }
 
     /**
