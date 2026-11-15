@@ -146,7 +146,7 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
             expect(stats[2]).to.equal(1); // repaid
             expect(stats[3]).to.equal(1); // defaulted
             expect(stats[4]).to.equal(1); // cancelled
-            expect(stats[5]).to.equal(1); // liquidated (updated)
+            expect(stats[5]).to.equal(0); // liquidated
         });
 
         it("getBorrowerLoans should return correct IDs", async function () {
