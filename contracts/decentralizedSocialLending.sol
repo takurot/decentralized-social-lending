@@ -304,16 +304,20 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (amount > maxLoanAmount) revert LoanTooLarge();
         if (borrowerActiveLoans[msg.sender] >= maxActiveLoansPerBorrower) revert TooManyActiveLoans();
 
-        // 担保価値の評価
-        uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, collateralAmount);
-        
+        // 担保のデポジットと実受取額の計測（Fee-on-Transferトークン対策）
+        uint256 balanceBefore = IERC20(collateralToken).balanceOf(address(this));
+        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
+        uint256 actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
+        if (actualCollateral == 0) revert InvalidCollateral();
+
+        // 担保価値の評価（実受取額に基づく）
+        uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
+
         // collateralRatio = 15000 → ローン額の150%の担保価値が必要
         uint256 requiredCollateralValueInETH = amount * collateralRatio / BASIS_POINTS;
         if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
 
-        // 担保のデポジット
-        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
-        lockedCollateral[collateralToken] += collateralAmount;
+        lockedCollateral[collateralToken] += actualCollateral;
 
         uint256 loanId = loanCount++;
 
@@ -332,14 +336,14 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             startTime: 0,
             state: LoanState.Requested,
             collateralToken: collateralToken,
-            collateralAmount: collateralAmount,
+            collateralAmount: actualCollateral,
             remainingRepaymentAmount: repaymentAmount
         });
 
         borrowerActiveLoans[msg.sender]++;
         _borrowerLoanIds[msg.sender].push(loanId);
 
-        emit LoanRequested(loanId, msg.sender, amount, interestRate, duration, collateralToken, collateralAmount);
+        emit LoanRequested(loanId, msg.sender, amount, interestRate, duration, collateralToken, actualCollateral);
     }
 
     /**
