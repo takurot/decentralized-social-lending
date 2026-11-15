@@ -7,38 +7,38 @@ describe("SocialLendingWithCollateral", function () {
   const BASIS_POINTS = 10000;
 
   beforeEach(async function () {
-    // コントラクトとアカウントの設定
+    // Set up contracts and accounts
     [owner, feeRecipient, borrower, lender, ...others] = await ethers.getSigners();
 
-    // モックERC20トークンのデプロイ
+    // Deploy mock ERC20 token
     const MockERC20Factory = await ethers.getContractFactory("MockERC20");
     mockToken = await MockERC20Factory.deploy("Mock Token", "MOCK", 18);
 
-    // モックプライスフィードのデプロイ
+    // Deploy mock price feed
     const MockPriceFeedFactory = await ethers.getContractFactory("MockPriceFeed");
     mockPriceFeed = await MockPriceFeedFactory.deploy();
 
-    // メインコントラクトのデプロイ
+    // Deploy main lending contract
     const SocialLendingFactory = await ethers.getContractFactory("SocialLendingWithCollateral");
     socialLending = await SocialLendingFactory.deploy(feeRecipient.address);
 
-    // 担保トークンの設定
+    // Configure collateral token
     await socialLending.setCollateralTokenStatus(mockToken.getAddress(), true);
     await socialLending.setCollateralTokenDecimals(mockToken.getAddress(), 18);
     await socialLending.setPriceFeed(mockToken.getAddress(), mockPriceFeed.getAddress());
 
-    // 借り手にトークンを付与
+    // Mint tokens to borrower
     await mockToken.mint(borrower.address, ethers.parseEther("1000"));
     await mockToken.connect(borrower).approve(socialLending.getAddress(), ethers.parseEther("1000"));
   });
 
-  describe("基本設定", function () {
-    it("コンストラクタが正しく設定されていること", async function () {
+  describe("Basic Configuration", function () {
+    it("should initialize constructor parameters correctly", async function () {
       expect(await socialLending.feeRecipient()).to.equal(feeRecipient.address);
       expect(await socialLending.owner()).to.equal(owner.address);
     });
 
-    it("担保トークンが正しく設定されていること", async function () {
+    it("should configure collateral token correctly", async function () {
       const tokenAddress = await mockToken.getAddress();
       const priceFeedAddress = await mockPriceFeed.getAddress();
 
@@ -48,8 +48,8 @@ describe("SocialLendingWithCollateral", function () {
     });
   });
 
-  describe("セキュリティ強化", function () {
-    it("0アドレスの担保トークンは拒否されること", async function () {
+  describe("Security Validations", function () {
+    it("should reject zero-address collateral token", async function () {
       await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8));
 
       const loanAmount = ethers.parseEther("1");
@@ -64,14 +64,14 @@ describe("SocialLendingWithCollateral", function () {
       ).to.be.revertedWithCustomError(socialLending, "InvalidAddress");
     });
 
-    it("過剰なデシマル設定は拒否されること", async function () {
+    it("should reject decimals greater than 18", async function () {
       const tokenAddress = await mockToken.getAddress();
       await expect(
         socialLending.setCollateralTokenDecimals(tokenAddress, 19)
       ).to.be.revertedWithCustomError(socialLending, "InvalidParameter");
     });
 
-    it("不正な価格データが検出されること", async function () {
+    it("should detect invalid or stale oracle price data", async function () {
       const tokenAddress = await mockToken.getAddress();
       const now = BigInt((await ethers.provider.getBlock("latest")).timestamp);
       await mockPriceFeed.setPriceData(
@@ -88,15 +88,15 @@ describe("SocialLendingWithCollateral", function () {
     });
   });
 
-  describe("ローンリクエスト", function () {
-    it("有効なローンリクエストが作成できること", async function () {
-      // プライスフィードの設定
-      await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8)); // 1トークン = 2000 ETH
+  describe("Loan Requests", function () {
+    it("should create a valid loan request", async function () {
+      // Configure price feed
+      await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8)); // 1 token = 2000 ETH
 
       const loanAmount = ethers.parseEther("1");
       const interestRate = 500; // 5%
-      const duration = 30 * 24 * 60 * 60; // 30日
-      const collateralAmount = ethers.parseEther("0.001"); // 0.001トークン = 2 ETH (Collateral Ratio 150%で十分)
+      const duration = 30 * 24 * 60 * 60; // 30 days
+      const collateralAmount = ethers.parseEther("0.001"); // 0.001 token = 2 ETH (sufficient for 150% collateral ratio)
       const tokenAddress = await mockToken.getAddress();
 
       await expect(
@@ -111,7 +111,7 @@ describe("SocialLendingWithCollateral", function () {
         .to.emit(socialLending, "LoanRequested")
         .withArgs(0, borrower.address, loanAmount, interestRate, duration, tokenAddress, collateralAmount);
 
-      // ローン情報の確認
+      // Verify loan details
       const loan = await socialLending.loans(0);
       expect(loan.borrower).to.equal(borrower.address);
       expect(loan.principalAmount).to.equal(loanAmount);
@@ -119,14 +119,14 @@ describe("SocialLendingWithCollateral", function () {
       expect(loan.state).to.equal(0); // Requested
     });
 
-    it("担保価値が不足している場合はリクエストが失敗すること", async function () {
-      // プライスフィードの設定
-      await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8)); // 1トークン = 2000 ETH
+    it("should revert when collateral value is insufficient", async function () {
+      // Configure price feed
+      await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8)); // 1 token = 2000 ETH
 
       const loanAmount = ethers.parseEther("10");
       const interestRate = 500; // 5%
-      const duration = 30 * 24 * 60 * 60; // 30日
-      const collateralAmount = ethers.parseEther("0.001"); // 0.001トークン = 2 ETH (Collateral Ratio 150%で不足)
+      const duration = 30 * 24 * 60 * 60; // 30 days
+      const collateralAmount = ethers.parseEther("0.001"); // 0.001 token = 2 ETH (insufficient for 150% collateral ratio)
       const tokenAddress = await mockToken.getAddress();
 
       await expect(
@@ -141,15 +141,15 @@ describe("SocialLendingWithCollateral", function () {
     });
   });
 
-  describe("ローン資金提供", function () {
+  describe("Loan Funding", function () {
     beforeEach(async function () {
-      // プライスフィードの設定
+      // Configure price feed
       await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8));
 
-      // ローンリクエストの作成
+      // Create loan request
       const loanAmount = ethers.parseEther("1");
       const interestRate = 500; // 5%
-      const duration = 30 * 24 * 60 * 60; // 30日
+      const duration = 30 * 24 * 60 * 60; // 30 days
       const collateralAmount = ethers.parseEther("0.001");
       const tokenAddress = await mockToken.getAddress();
 
@@ -162,7 +162,7 @@ describe("SocialLendingWithCollateral", function () {
       );
     });
 
-    it("貸し手がローンに資金提供できること", async function () {
+    it("should allow lender to fund a loan", async function () {
       const loanId = 0;
       const loan = await socialLending.loans(loanId);
 
@@ -172,14 +172,14 @@ describe("SocialLendingWithCollateral", function () {
         .to.emit(socialLending, "LoanFunded")
         .withArgs(loanId, lender.address);
 
-      // ローン状態の確認
+      // Verify loan state
       const updatedLoan = await socialLending.loans(loanId);
       expect(updatedLoan.lender).to.equal(lender.address);
       expect(updatedLoan.state).to.equal(1); // Funded
       expect(updatedLoan.startTime).to.not.equal(0);
     });
 
-    it("不正確な金額での資金提供が失敗すること", async function () {
+    it("should revert when funding amount is incorrect", async function () {
       const loanId = 0;
       const loan = await socialLending.loans(loanId);
       const incorrectAmount = BigInt(loan.principalAmount) + ethers.parseEther("0.1");
@@ -190,13 +190,13 @@ describe("SocialLendingWithCollateral", function () {
     });
   });
 
-  describe("担保率計算", function () {
+  describe("Collateralization Ratio Calculation", function () {
     beforeEach(async function () {
       await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8));
 
       const loanAmount = ethers.parseEther("1");
       const interestRate = 500; // 5%
-      const duration = 30 * 24 * 60 * 60; // 30日
+      const duration = 30 * 24 * 60 * 60; // 30 days
       const collateralAmount = ethers.parseEther("0.001");
       const tokenAddress = await mockToken.getAddress();
 
@@ -213,7 +213,7 @@ describe("SocialLendingWithCollateral", function () {
       await socialLending.connect(lender).fundLoan(loanId, { value: loan.principalAmount });
     });
 
-    it("資金提供後の担保率が正しく計算されること", async function () {
+    it("should calculate collateralization ratio accurately after funding", async function () {
       const loanId = 0;
       const price = ethers.parseUnits("2000", 8);
       const collateralAmount = ethers.parseEther("0.001");
@@ -226,15 +226,15 @@ describe("SocialLendingWithCollateral", function () {
     });
   });
 
-  describe("ローン返済", function () {
+  describe("Loan Repayment", function () {
     beforeEach(async function () {
-      // プライスフィードの設定
+      // Configure price feed
       await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8));
 
-      // ローンリクエストの作成
+      // Create loan request
       const loanAmount = ethers.parseEther("1");
       const interestRate = 500; // 5%
-      const duration = 30 * 24 * 60 * 60; // 30日
+      const duration = 30 * 24 * 60 * 60; // 30 days
       const collateralAmount = ethers.parseEther("0.001");
       const tokenAddress = await mockToken.getAddress();
 
@@ -246,13 +246,13 @@ describe("SocialLendingWithCollateral", function () {
         collateralAmount
       );
 
-      // 資金提供
+      // Fund the loan
       const loanId = 0;
       const loan = await socialLending.loans(loanId);
       await socialLending.connect(lender).fundLoan(loanId, { value: loan.principalAmount });
     });
 
-    it("借り手が部分返済できること", async function () {
+    it("should allow borrower to make a partial repayment", async function () {
       const loanId = 0;
       const loan = await socialLending.loans(loanId);
       const partialAmount = BigInt(loan.remainingRepaymentAmount) / 2n;
@@ -263,13 +263,13 @@ describe("SocialLendingWithCollateral", function () {
         .to.emit(socialLending, "LoanPartiallyRepaid")
         .withArgs(loanId, borrower.address, partialAmount, BigInt(loan.remainingRepaymentAmount) - partialAmount);
 
-      // 残りの返済額の確認
+      // Verify remaining repayment amount
       const updatedLoan = await socialLending.loans(loanId);
       expect(updatedLoan.remainingRepaymentAmount).to.equal(BigInt(loan.remainingRepaymentAmount) - partialAmount);
       expect(updatedLoan.state).to.equal(1); // Still Funded
     });
 
-    it("借り手が全額返済できること", async function () {
+    it("should allow borrower to repay the loan in full", async function () {
       const loanId = 0;
       const loan = await socialLending.loans(loanId);
 
@@ -279,22 +279,22 @@ describe("SocialLendingWithCollateral", function () {
         .to.emit(socialLending, "LoanRepaid")
         .withArgs(loanId, borrower.address, lender.address, loan.remainingRepaymentAmount);
 
-      // ローン状態の確認
+      // Verify loan state
       const updatedLoan = await socialLending.loans(loanId);
       expect(updatedLoan.remainingRepaymentAmount).to.equal(0);
       expect(updatedLoan.state).to.equal(2); // Repaid
     });
   });
 
-  describe("デフォルト処理", function () {
+  describe("Default Handling", function () {
     beforeEach(async function () {
-      // プライスフィードの設定
+      // Configure price feed
       await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8));
 
-      // ローンリクエストの作成
+      // Create loan request
       const loanAmount = ethers.parseEther("1");
       const interestRate = 500; // 5%
-      const duration = 30 * 24 * 60 * 60; // 30日
+      const duration = 30 * 24 * 60 * 60; // 30 days
       const collateralAmount = ethers.parseEther("0.001");
       const tokenAddress = await mockToken.getAddress();
 
@@ -306,17 +306,17 @@ describe("SocialLendingWithCollateral", function () {
         collateralAmount
       );
 
-      // 資金提供
+      // Fund the loan
       const loanId = 0;
       const loan = await socialLending.loans(loanId);
       await socialLending.connect(lender).fundLoan(loanId, { value: loan.principalAmount });
     });
 
-    it("期限切れ後に貸し手がデフォルトを宣言できること", async function () {
+    it("should allow lender to declare default after expiration", async function () {
       const loanId = 0;
 
-      // 時間を進める
-      await ethers.provider.send("evm_increaseTime", [31 * 24 * 60 * 60]); // 31日
+      // Advance block timestamp
+      await ethers.provider.send("evm_increaseTime", [31 * 24 * 60 * 60]); // 31 days
       await ethers.provider.send("evm_mine");
 
       await expect(
@@ -325,12 +325,12 @@ describe("SocialLendingWithCollateral", function () {
         .to.emit(socialLending, "DefaultDeclared")
         .withArgs(loanId, lender.address);
 
-      // ローン状態の確認
+      // Verify loan state
       const updatedLoan = await socialLending.loans(loanId);
       expect(updatedLoan.state).to.equal(3); // Defaulted
     });
 
-    it("期限前にデフォルト宣言が失敗すること", async function () {
+    it("should revert default declaration before expiration", async function () {
       const loanId = 0;
 
       await expect(
