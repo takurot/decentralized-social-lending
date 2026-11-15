@@ -35,6 +35,9 @@ error Unauthorized();
 error TooManyActiveLoans();
 error LoanTooLarge();
 error InsufficientUnlockedCollateral();
+error ChangeNotQueued();
+error TimelockNotElapsed();
+error ChangeAlreadyExecuted();
 
 contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     using SafeERC20 for IERC20;
@@ -98,6 +101,21 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     uint256 public cancelledLoansCount;
     uint256 public liquidatedLoansCount;
 
+    // タイムロック設定
+    uint256 public constant TIMELOCK_DELAY = 48 hours;
+    bool public timelockEnabled;
+
+    struct PendingChange {
+        bytes4 functionSelector;
+        bytes params;
+        bytes32 callKey;
+        uint256 executeAfter;
+        bool executed;
+    }
+
+    mapping(bytes32 => PendingChange) public pendingChanges;
+    mapping(bytes32 => bytes32) private _queuedOperationByCall;
+
     // ユーザーのアクティブローン数追跡
     mapping(address => uint256) public borrowerActiveLoans;
     mapping(address => uint256) public lenderActiveLoans;
@@ -152,6 +170,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     event MaxActiveLoansPerBorrowerUpdated(uint256 newMax);
     event MaxLoanAmountUpdated(uint256 newMaxAmount);
+    event TimelockEnabled();
+    event ChangeQueued(bytes32 indexed operationHash, bytes4 indexed functionSelector, bytes params, uint256 executeAfter);
+    event ChangeExecuted(bytes32 indexed operationHash);
+    event ChangeCancelled(bytes32 indexed operationHash);
 
     /**
      * @notice Constructor to initialize the contract with the fee recipient
@@ -252,6 +274,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      */
     function setCollateralTokenStatus(address token, bool allowed) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
+        _consumeTimelock(msg.sig, abi.encode(token, allowed));
         allowedCollateralTokens[token] = allowed;
         emit CollateralTokenStatusUpdated(token, allowed);
     }
@@ -605,9 +628,75 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         return activeLoanIds;
     }
 
+    /**
+     * @notice Permanently enables the 48-hour timelock for sensitive admin setters.
+     */
+    function enableTimelock() external onlyOwner {
+        if (timelockEnabled) revert InvalidParameter();
+        timelockEnabled = true;
+        emit TimelockEnabled();
+    }
+
+    /**
+     * @notice Queues a timelocked admin parameter change.
+     */
+    function queueChange(
+        bytes4 functionSelector,
+        bytes calldata params
+    ) external onlyOwner returns (bytes32 operationHash) {
+        if (functionSelector == bytes4(0)) revert InvalidParameter();
+        uint256 executeAfter = block.timestamp + TIMELOCK_DELAY;
+        bytes32 callKey = keccak256(abi.encode(functionSelector, params));
+        operationHash = keccak256(abi.encode(functionSelector, params, executeAfter));
+        pendingChanges[operationHash] = PendingChange({
+            functionSelector: functionSelector,
+            params: params,
+            callKey: callKey,
+            executeAfter: executeAfter,
+            executed: false
+        });
+        _queuedOperationByCall[callKey] = operationHash;
+        emit ChangeQueued(operationHash, functionSelector, params, executeAfter);
+    }
+
+    /**
+     * @notice Cancels a queued timelock change before execution.
+     */
+    function cancelChange(bytes32 operationHash) external onlyOwner {
+        PendingChange storage change = pendingChanges[operationHash];
+        if (change.executeAfter == 0) revert ChangeNotQueued();
+        if (change.executed) revert ChangeAlreadyExecuted();
+
+        bytes32 callKey = change.callKey;
+        if (_queuedOperationByCall[callKey] == operationHash) {
+            delete _queuedOperationByCall[callKey];
+        }
+        delete pendingChanges[operationHash];
+        emit ChangeCancelled(operationHash);
+    }
+
+    /**
+     * @dev Verifies and consumes a queued timelock operation when timelock is enabled.
+     */
+    function _consumeTimelock(bytes4 functionSelector, bytes memory params) internal {
+        if (!timelockEnabled) return;
+
+        bytes32 callKey = keccak256(abi.encode(functionSelector, params));
+        bytes32 operationHash = _queuedOperationByCall[callKey];
+        PendingChange storage change = pendingChanges[operationHash];
+
+        if (change.executeAfter == 0) revert ChangeNotQueued();
+        if (block.timestamp < change.executeAfter) revert TimelockNotElapsed();
+
+        change.executed = true;
+        delete _queuedOperationByCall[callKey];
+        emit ChangeExecuted(operationHash);
+    }
+
     // プラットフォーム手数料を設定する関数（管理者用）
     function setPlatformFee(uint256 _platformFee) external onlyOwner {
         if (_platformFee > MAX_PLATFORM_FEE) revert InvalidParameter();
+        _consumeTimelock(msg.sig, abi.encode(_platformFee));
         platformFee = _platformFee;
         emit PlatformFeeUpdated(_platformFee);
     }
@@ -615,6 +704,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     // 手数料受取者を設定する関数（管理者用）
     function setFeeRecipient(address _feeRecipient) external onlyOwner {
         if (_feeRecipient == address(0)) revert InvalidAddress();
+        _consumeTimelock(msg.sig, abi.encode(_feeRecipient));
         feeRecipient = _feeRecipient;
         emit FeeRecipientUpdated(_feeRecipient);
     }
@@ -622,6 +712,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     // 担保率（Collateral Ratio）を設定する関数（管理者用）
     function setCollateralRatio(uint256 _collateralRatio) external onlyOwner {
         if (_collateralRatio < MIN_COLLATERAL_RATIO || _collateralRatio > MAX_COLLATERAL_RATIO) revert InvalidParameter();
+        _consumeTimelock(msg.sig, abi.encode(_collateralRatio));
         collateralRatio = _collateralRatio;
         emit CollateralRatioUpdated(_collateralRatio);
     }
