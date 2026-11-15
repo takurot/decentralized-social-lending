@@ -87,8 +87,9 @@ describe("Edge Cases", function () {
         const loanId = 0;
         await socialLending.connect(lender).fundLoan(loanId, { value: LOAN_AMOUNT });
 
-        // Advance time
-        await ethers.provider.send("evm_increaseTime", [duration + 1]);
+        // Advance time past duration + grace period
+        const grace = await socialLending.gracePeriod();
+        await ethers.provider.send("evm_increaseTime", [duration + Number(grace) + 1]);
         await ethers.provider.send("evm_mine");
 
         // Other user calls it
@@ -99,5 +100,9 @@ describe("Edge Cases", function () {
         // Check state
         const loan = await socialLending.loans(loanId);
         expect(loan.state).to.equal(3); // Defaulted
+
+        const stats = await socialLending.getStats();
+        expect(stats.defaultedLoans).to.equal(1);
+        expect(stats.liquidatedLoans).to.equal(0);
     });
 });

@@ -166,8 +166,47 @@ describe("Coverage Branch Completion (Issue #16)", function () {
 
     it("should revert rescueETH when amount exceeds contract balance and rescueTokens on zero recipient", async function () {
         await expect(lending.rescueETH(ethers.parseEther("10"), owner.address))
-            .to.be.revertedWith("Address: insufficient balance");
+            .to.be.revertedWithCustomError(lending, "InsufficientUnlockedETH");
         await expect(lending.rescueTokens(await mockToken.getAddress(), 1, ethers.ZeroAddress))
             .to.be.revertedWithCustomError(lending, "InvalidAddress");
+    });
+
+    it("should cover acceptLoanOffer validation revert branches", async function () {
+        const tokenAddr = await mockToken.getAddress();
+        await lending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, tokenAddr, 15000, {
+            value: ethers.parseEther("1")
+        });
+
+        await expect(lending.connect(borrower).acceptLoanOffer(0, 0, 86400, tokenAddr, ethers.parseEther("1")))
+            .to.be.revertedWithCustomError(lending, "InvalidInterestRate");
+        await expect(lending.connect(borrower).acceptLoanOffer(0, 1001, 86400, tokenAddr, ethers.parseEther("1")))
+            .to.be.revertedWithCustomError(lending, "InvalidInterestRate");
+        await expect(lending.connect(borrower).acceptLoanOffer(0, 500, 100, tokenAddr, ethers.parseEther("1")))
+            .to.be.revertedWithCustomError(lending, "InvalidDuration");
+        await expect(lending.connect(borrower).acceptLoanOffer(0, 500, 31 * 86400, tokenAddr, ethers.parseEther("1")))
+            .to.be.revertedWithCustomError(lending, "InvalidDuration");
+        await expect(lending.connect(borrower).acceptLoanOffer(0, 500, 86400, tokenAddr, 0))
+            .to.be.revertedWithCustomError(lending, "InvalidCollateral");
+        await expect(lending.connect(borrower).acceptLoanOffer(0, 500, 86400, ethers.ZeroAddress, ethers.parseEther("1")))
+            .to.be.revertedWithCustomError(lending, "InvalidAddress");
+
+        const MockERC20 = await ethers.getContractFactory("MockERC20");
+        const otherToken = await MockERC20.deploy("Other", "OTH", 18);
+        const otherAddr = await otherToken.getAddress();
+        await expect(lending.connect(borrower).acceptLoanOffer(0, 500, 86400, otherAddr, ethers.parseEther("1")))
+            .to.be.revertedWithCustomError(lending, "TokenNotAllowed");
+
+        await lending.setCollateralTokenStatus(otherAddr, true);
+        await expect(lending.connect(borrower).acceptLoanOffer(0, 500, 86400, otherAddr, ethers.parseEther("1")))
+            .to.be.revertedWithCustomError(lending, "TokenNotAllowed");
+
+        await lending.setMaxActiveLoansPerBorrower(1);
+        await lending.connect(borrower).acceptLoanOffer(0, 500, 86400, tokenAddr, ethers.parseEther("1"));
+
+        await lending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, ethers.ZeroAddress, 15000, {
+            value: ethers.parseEther("1")
+        });
+        await expect(lending.connect(borrower).acceptLoanOffer(1, 500, 86400, tokenAddr, ethers.parseEther("1")))
+            .to.be.revertedWithCustomError(lending, "TooManyActiveLoans");
     });
 });
