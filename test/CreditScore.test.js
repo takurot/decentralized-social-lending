@@ -101,7 +101,7 @@ describe("Social Credit Score System (PR-07)", function () {
         );
         await socialLending.connect(lender).fundLoan(0, { value: loanAmount });
 
-        await ethers.provider.send("evm_increaseTime", [DURATION + 1]);
+        await ethers.provider.send("evm_increaseTime", [DURATION + 3 * 86400 + 1]);
         await ethers.provider.send("evm_mine");
 
         await expect(socialLending.connect(lender).declareDefault(0))
@@ -123,7 +123,7 @@ describe("Social Credit Score System (PR-07)", function () {
         );
         await socialLending.connect(lender).fundLoan(1, { value: loanAmount });
 
-        await ethers.provider.send("evm_increaseTime", [DURATION + 1]);
+        await ethers.provider.send("evm_increaseTime", [DURATION + 3 * 86400 + 1]);
         await ethers.provider.send("evm_mine");
 
         await expect(socialLending.connect(other).checkAndDeclareDefault(1))
@@ -162,7 +162,7 @@ describe("Social Credit Score System (PR-07)", function () {
             ethers.parseEther("2")
         );
         await socialLending.connect(lender).fundLoan(1, { value: amount1 });
-        await ethers.provider.send("evm_increaseTime", [DURATION + 1]);
+        await ethers.provider.send("evm_increaseTime", [DURATION + 3 * 86400 + 1]);
         await ethers.provider.send("evm_mine");
         await socialLending.connect(lender).declareDefault(1);
         expect(await socialLending.getCreditScore(borrower.address)).to.equal(5500);
