@@ -292,4 +292,205 @@ describe("SocialLendingWithCollateral Security", function () {
             ).to.be.revertedWithCustomError(socialLending, "InvalidCollateral");
         });
     });
+
+    describe("Pull-Payment ETH Fallback & Rescue Protection (Issue #10)", function () {
+        let revertingReceiver;
+
+        beforeEach(async function () {
+            const RevertingFactory = await ethers.getContractFactory("MockRevertingReceiver");
+            revertingReceiver = await RevertingFactory.deploy();
+        });
+
+        it("should queue repayment ETH instead of reverting when lender rejects ETH", async function () {
+            const loanAmount = ethers.parseEther("1");
+            const collateralAmount = ethers.parseEther("0.002");
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                500,
+                30 * 86400,
+                await mockToken.getAddress(),
+                collateralAmount
+            );
+
+            // RevertingReceiver funds the loan
+            const fundData = socialLending.interface.encodeFunctionData("fundLoan", [0]);
+            await revertingReceiver.callContract(await socialLending.getAddress(), fundData, { value: loanAmount });
+
+            const loan = await socialLending.loans(0);
+            const receiverAddr = await revertingReceiver.getAddress();
+
+            // Borrower repays in full; lender reverts on ETH receive, so ETH is queued
+            await expect(
+                socialLending.connect(borrower).repayLoan(0, { value: loan.remainingRepaymentAmount })
+            )
+                .to.emit(socialLending, "ETHWithdrawalQueued")
+                .withArgs(receiverAddr, loan.remainingRepaymentAmount);
+
+            const updatedLoan = await socialLending.loans(0);
+            expect(updatedLoan.state).to.equal(2); // Repaid
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(loan.remainingRepaymentAmount);
+            expect(await socialLending.lockedETH()).to.equal(loan.remainingRepaymentAmount);
+
+            // rescueETH must not withdraw lockedETH
+            await expect(
+                socialLending.connect(owner).rescueETH(1n, owner.address)
+            ).to.be.revertedWithCustomError(socialLending, "InsufficientUnlockedETH");
+
+            // Lender disables revert and withdraws queued ETH even while paused
+            await revertingReceiver.setShouldRevert(false);
+            await socialLending.connect(owner).pause();
+            const withdrawData = socialLending.interface.encodeFunctionData("withdrawETH", []);
+            await revertingReceiver.callContract(await socialLending.getAddress(), withdrawData);
+
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(0);
+            expect(await socialLending.lockedETH()).to.equal(0);
+            expect(await ethers.provider.getBalance(receiverAddr)).to.equal(loan.remainingRepaymentAmount);
+        });
+
+        it("should not allow a gas-burning lender to DoS repayLoan", async function () {
+            const loanAmount = ethers.parseEther("1");
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                500,
+                30 * 86400,
+                await mockToken.getAddress(),
+                ethers.parseEther("0.002")
+            );
+            const fundData = socialLending.interface.encodeFunctionData("fundLoan", [0]);
+            await revertingReceiver.callContract(await socialLending.getAddress(), fundData, { value: loanAmount });
+
+            await revertingReceiver.setBurnGas(true);
+            const loan = await socialLending.loans(0);
+            await expect(
+                socialLending.connect(borrower).repayLoan(0, { value: loan.remainingRepaymentAmount })
+            ).to.not.be.reverted;
+            expect(await socialLending.pendingETHWithdrawals(await revertingReceiver.getAddress())).to.equal(
+                loan.remainingRepaymentAmount
+            );
+        });
+
+        it("should queue fee ETH when feeRecipient reverts on receive", async function () {
+            const receiverAddr = await revertingReceiver.getAddress();
+            await socialLending.connect(owner).setFeeRecipient(receiverAddr);
+
+            const loanAmount = ethers.parseEther("1");
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                500,
+                30 * 86400,
+                await mockToken.getAddress(),
+                ethers.parseEther("0.002")
+            );
+
+            const expectedFee = (loanAmount * 100n) / 10000n;
+            await expect(socialLending.connect(lender).fundLoan(0, { value: loanAmount }))
+                .to.emit(socialLending, "ETHWithdrawalQueued")
+                .withArgs(receiverAddr, expectedFee);
+
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(expectedFee);
+            expect(await socialLending.lockedETH()).to.equal(expectedFee);
+        });
+
+        it("should revert withdrawETH when pending balance is 0", async function () {
+            await expect(socialLending.connect(lender).withdrawETH())
+                .to.be.revertedWithCustomError(socialLending, "InvalidAmount");
+        });
+
+        it("should emit TokensRescued and ETHRescued events", async function () {
+            const extraTokens = ethers.parseEther("1");
+            await mockToken.mint(await socialLending.getAddress(), extraTokens);
+            await expect(
+                socialLending.connect(owner).rescueTokens(await mockToken.getAddress(), extraTokens, owner.address)
+            )
+                .to.emit(socialLending, "TokensRescued")
+                .withArgs(await mockToken.getAddress(), extraTokens, owner.address);
+
+            const extraETH = ethers.parseEther("0.5");
+            await owner.sendTransaction({ to: await socialLending.getAddress(), value: extraETH });
+            await expect(
+                socialLending.connect(owner).rescueETH(extraETH, owner.address)
+            )
+                .to.emit(socialLending, "ETHRescued")
+                .withArgs(extraETH, owner.address);
+        });
+    });
+
+    describe("Collateral Valuation, Decimals & Oracle Safety (Issue #9)", function () {
+        it("should require collateral covering principal + interest so initial ratio >= collateralRatio", async function () {
+            // 1 Token = 1 ETH
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
+            const loanAmount = ethers.parseEther("1");
+            const interestRate = 2000; // 20%
+            const duration = 365 * 86400; // 1 year => repaymentAmount = 1.2 ETH
+            // Required at 150% of 1.2 ETH = 1.8 ETH.
+            // 1.5 ETH (150% of principal only) should revert!
+            await expect(
+                socialLending.connect(borrower).requestLoan(
+                    loanAmount,
+                    interestRate,
+                    duration,
+                    await mockToken.getAddress(),
+                    ethers.parseEther("1.5")
+                )
+            ).to.be.revertedWithCustomError(socialLending, "InsufficientCollateralValue");
+
+            // Exact 1.8 ETH collateral should succeed and have getCollateralizationRatio >= 15000
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                interestRate,
+                duration,
+                await mockToken.getAddress(),
+                ethers.parseEther("1.8")
+            );
+            await socialLending.connect(lender).fundLoan(0, { value: loanAmount });
+            expect(await socialLending.getCollateralizationRatio(0)).to.be.gte(15000n);
+        });
+
+        it("should value 6-decimal, 8-decimal, and 0-decimal tokens accurately", async function () {
+            const MockERC20Factory = await ethers.getContractFactory("MockERC20");
+            const token6 = await MockERC20Factory.deploy("USDC", "USDC", 6);
+            const token8 = await MockERC20Factory.deploy("WBTC", "WBTC", 8);
+            const token0 = await MockERC20Factory.deploy("ZERO", "ZERO", 0);
+
+            const feedAddr = await mockPriceFeed.getAddress();
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("2", 8)); // 1 token = 2 ETH
+
+            for (const [tok, dec, amt] of [
+                [token6, 6, ethers.parseUnits("1", 6)],
+                [token8, 8, ethers.parseUnits("1", 8)],
+                [token0, 0, 1n],
+            ]) {
+                const addr = await tok.getAddress();
+                await socialLending.setCollateralTokenStatus(addr, true);
+                await socialLending.setPriceFeed(addr, feedAddr);
+                expect(await socialLending.collateralTokenDecimals(addr)).to.equal(dec);
+                expect(await socialLending.getCollateralValueInETH(addr, amt)).to.equal(ethers.parseEther("2"));
+            }
+        });
+
+        it("should revert with TokenDecimalsNotSet if token has no decimals() and decimals were not explicitly set", async function () {
+            const nonMetadataToken = lender.address; // EOA has no decimals()
+            await socialLending.setCollateralTokenStatus(nonMetadataToken, true);
+            await socialLending.setPriceFeed(nonMetadataToken, await mockPriceFeed.getAddress());
+
+            await expect(
+                socialLending.getCollateralValueInETH(nonMetadataToken, 100)
+            ).to.be.revertedWithCustomError(socialLending, "TokenDecimalsNotSet");
+        });
+
+        it("should revert with InvalidPriceData when updatedAt is in the future", async function () {
+            const now = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+            await mockPriceFeed.setPriceData(
+                ethers.parseUnits("2000", 8),
+                1n,
+                now,
+                now + 3600n,
+                1n
+            );
+
+            await expect(
+                socialLending.getCollateralValueInETH(await mockToken.getAddress(), ethers.parseEther("1"))
+            ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
+        });
+    });
 });

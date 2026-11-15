@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 // OpenZeppelinのライブラリをインポート
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -35,6 +36,8 @@ error Unauthorized();
 error TooManyActiveLoans();
 error LoanTooLarge();
 error InsufficientUnlockedCollateral();
+error InsufficientUnlockedETH();
+error TokenDecimalsNotSet();
 
 contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     using SafeERC20 for IERC20;
@@ -107,6 +110,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     
     // 担保トークンのデシマル
     mapping(address => uint8) public collateralTokenDecimals;
+    mapping(address => bool) public collateralDecimalsSet;
 
     // オラクルのマッピング（担保トークンアドレス => プライスフィードアドレス）
     mapping(address => address) public priceFeeds;
@@ -117,6 +121,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     // 担保トークンごとのロック済み残高
     mapping(address => uint256) public lockedCollateral;
+
+    // 保留中のETH引き出し残高（Pull-paymentフォールバック）とロック済みETH
+    mapping(address => uint256) public pendingETHWithdrawals;
+    uint256 public lockedETH;
 
     // 借入制限
     uint256 public maxLoanAmount = 10 ether;
@@ -152,6 +160,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     event MaxActiveLoansPerBorrowerUpdated(uint256 newMax);
     event MaxLoanAmountUpdated(uint256 newMaxAmount);
+    event ETHWithdrawalQueued(address indexed recipient, uint256 amount);
+    event ETHWithdrawn(address indexed recipient, uint256 amount);
+    event TokensRescued(address indexed token, uint256 amount, address indexed to);
+    event ETHRescued(uint256 amount, address indexed to);
 
     /**
      * @notice Constructor to initialize the contract with the fee recipient
@@ -253,6 +265,19 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function setCollateralTokenStatus(address token, bool allowed) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
         allowedCollateralTokens[token] = allowed;
+        if (allowed && !collateralDecimalsSet[token] && token.code.length > 0) {
+            (bool ok, bytes memory data) = token.staticcall(
+                abi.encodeWithSelector(IERC20Metadata.decimals.selector)
+            );
+            if (ok && data.length >= 32) {
+                uint256 dec = abi.decode(data, (uint256));
+                if (dec <= 18) {
+                    collateralTokenDecimals[token] = uint8(dec);
+                    collateralDecimalsSet[token] = true;
+                    emit CollateralTokenDecimalsUpdated(token, uint8(dec));
+                }
+            }
+        }
         emit CollateralTokenStatusUpdated(token, allowed);
     }
 
@@ -265,6 +290,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (token == address(0)) revert InvalidAddress();
         if (decimals > 18) revert InvalidParameter();
         collateralTokenDecimals[token] = decimals;
+        collateralDecimalsSet[token] = true;
         emit CollateralTokenDecimalsUpdated(token, decimals);
     }
 
@@ -310,21 +336,24 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
         if (actualCollateral == 0) revert InvalidCollateral();
 
-        // 担保価値の評価（実受取額に基づく）
-        uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
+        // 単利による返済総額の計算（Math.mulDivを使用）
+        uint256 annualInterest = Math.mulDiv(amount, interestRate, BASIS_POINTS);
+        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
+        uint256 repaymentAmount = amount + interestAmount;
 
-        // collateralRatio = 15000 → ローン額の150%の担保価値が必要
-        uint256 requiredCollateralValueInETH = amount * collateralRatio / BASIS_POINTS;
+        // 担保価値の評価（実受取額と返済総額を基準に必要担保価値を計算）
+        uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
+        uint256 requiredCollateralValueInETH = Math.mulDiv(
+            repaymentAmount,
+            collateralRatio,
+            BASIS_POINTS,
+            Math.Rounding.Up
+        );
         if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
 
         lockedCollateral[collateralToken] += actualCollateral;
 
         uint256 loanId = loanCount++;
-
-        // 単利による返済総額の計算（Math.mulDivを使用）
-        uint256 annualInterest = Math.mulDiv(amount, interestRate, BASIS_POINTS);
-        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
-        uint256 repaymentAmount = amount + interestAmount;
 
         loans[loanId] = Loan({
             borrower: payable(msg.sender),
@@ -389,11 +418,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 feeAmount = msg.value * platformFee / BASIS_POINTS;
         uint256 amountToBorrower = msg.value - feeAmount;
 
-        // 手数料送金
-        payable(feeRecipient).sendValue(feeAmount);
+        // 手数料送金（失敗時はPull-paymentキューへ退避）
+        _safeTransferETHOrQueue(feeRecipient, feeAmount);
 
-        // 借り手への送金
-        loan.borrower.sendValue(amountToBorrower);
+        // 借り手への送金（失敗時はPull-paymentキューへ退避）
+        _safeTransferETHOrQueue(loan.borrower, amountToBorrower);
 
         emit LoanFunded(loanId, msg.sender);
     }
@@ -434,12 +463,37 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             emit LoanPartiallyRepaid(loanId, loan.borrower, amount, loan.remainingRepaymentAmount);
         }
 
-        // 貸し手への送金
-        loan.lender.sendValue(amount);
+        // 貸し手への送金（失敗時はPull-paymentキューへ退避）
+        _safeTransferETHOrQueue(loan.lender, amount);
 
-        // 余剰分を借り手に返却
+        // 余剰分を借り手に返却（失敗時はPull-paymentキューへ退避）
         if (excessAmount > 0) {
-            loan.borrower.sendValue(excessAmount);
+            _safeTransferETHOrQueue(loan.borrower, excessAmount);
+        }
+    }
+
+    /**
+     * @notice Withdraws queued ETH that failed direct push transfer
+     */
+    function withdrawETH() external nonReentrant {
+        uint256 amount = pendingETHWithdrawals[msg.sender];
+        if (amount == 0) revert InvalidAmount();
+        pendingETHWithdrawals[msg.sender] = 0;
+        lockedETH -= amount;
+        payable(msg.sender).sendValue(amount);
+        emit ETHWithdrawn(msg.sender, amount);
+    }
+
+    /**
+     * @dev Attempts bounded-gas ETH transfer and falls back to pull-payment queue on failure.
+     */
+    function _safeTransferETHOrQueue(address to, uint256 amount) internal {
+        if (amount == 0) return;
+        (bool success, ) = payable(to).call{value: amount, gas: 50_000}("");
+        if (!success) {
+            pendingETHWithdrawals[to] += amount;
+            lockedETH += amount;
+            emit ETHWithdrawalQueued(to, amount);
         }
     }
 
@@ -460,7 +514,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         
         activeLoansCount--;
         defaultedLoansCount++;
-        liquidatedLoansCount++;
 
         // 担保の貸し手への移転
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
@@ -486,7 +539,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         activeLoansCount--;
         defaultedLoansCount++;
-        liquidatedLoansCount++;
 
         // 担保の貸し手への移転
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
@@ -518,20 +570,20 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         // 価格データの検証
         if (price <= 0) revert InvalidPriceData();
-        if (startedAt == 0 || updatedAt == 0 || updatedAt < startedAt) revert InvalidPriceData();
-        if (updatedAt < block.timestamp - PRICE_FEED_TIMEOUT) revert StaleData();
+        if (startedAt == 0 || updatedAt == 0 || updatedAt < startedAt || updatedAt > block.timestamp) {
+            revert InvalidPriceData();
+        }
+        if (block.timestamp - updatedAt > PRICE_FEED_TIMEOUT) revert StaleData();
         if (answeredInRound < roundId) revert StaleData();
 
-        uint8 decimals = priceFeed.decimals();
-        
-        // 担保トークンのデシマルを考慮した計算
-        uint8 tokenDecimals = collateralTokenDecimals[collateralToken];
-        uint256 normalizedAmount = collateralAmount;
-        if (tokenDecimals > 0) {
-            normalizedAmount = collateralAmount * 10**18 / 10**uint256(tokenDecimals);
-        }
+        if (!collateralDecimalsSet[collateralToken]) revert TokenDecimalsNotSet();
 
-        uint256 collateralValueInETH = normalizedAmount * uint256(price) / 10**uint256(decimals);
+        uint8 decimals = priceFeed.decimals();
+        uint8 tokenDecimals = collateralTokenDecimals[collateralToken];
+
+        // 担保トークンのデシマルを考慮した計算（Math.mulDivを使用）
+        uint256 normalizedAmount = Math.mulDiv(collateralAmount, 1e18, 10 ** uint256(tokenDecimals));
+        uint256 collateralValueInETH = Math.mulDiv(normalizedAmount, uint256(price), 10 ** uint256(decimals));
         return collateralValueInETH;
     }
 
@@ -576,7 +628,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (loan.remainingRepaymentAmount == 0) {
             return type(uint256).max;
         }
-        return collateralValue * BASIS_POINTS / loan.remainingRepaymentAmount;
+        return Math.mulDiv(collateralValue, BASIS_POINTS, loan.remainingRepaymentAmount);
     }
 
     /**
@@ -664,11 +716,14 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 locked = lockedCollateral[token];
         if (contractBalance < locked + amount) revert InsufficientUnlockedCollateral();
         IERC20(token).safeTransfer(to, amount);
+        emit TokensRescued(token, amount, to);
     }
 
     // 緊急時にETHを回収する関数（管理者用）
-    function rescueETH(uint256 amount, address to) external onlyOwner {
+    function rescueETH(uint256 amount, address to) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidAddress();
+        if (address(this).balance < lockedETH + amount) revert InsufficientUnlockedETH();
         payable(to).sendValue(amount);
+        emit ETHRescued(amount, to);
     }
 }
