@@ -184,6 +184,115 @@ describe("SocialLendingWithCollateral Security", function () {
         });
     });
 
+    describe("Fee-on-Transfer Collateral Accounting (Issue #11)", function () {
+        let feeToken, feeTokenAddr;
+
+        beforeEach(async function () {
+            const FeeTokenFactory = await ethers.getContractFactory("MockFeeOnTransferERC20");
+            // 5% (500 bps) fee sent to owner
+            feeToken = await FeeTokenFactory.deploy("Fee Token", "FEE", 500, owner.address);
+            feeTokenAddr = await feeToken.getAddress();
+
+            await socialLending.setCollateralTokenStatus(feeTokenAddr, true);
+            await socialLending.setCollateralTokenDecimals(feeTokenAddr, 18);
+            await socialLending.setPriceFeed(feeTokenAddr, await mockPriceFeed.getAddress());
+
+            await feeToken.mint(borrower.address, ethers.parseEther("100"));
+            await feeToken.connect(borrower).approve(await socialLending.getAddress(), ethers.parseEther("100"));
+
+            // 1 token = 1 ETH
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
+        });
+
+        it("should track actual received collateral in lockedCollateral and loan.collateralAmount", async function () {
+            const loanAmount = ethers.parseEther("1");
+            const sentCollateral = ethers.parseEther("2"); // 5% fee => 1.9 ETH received (> 1.5 ETH required)
+            const expectedReceived = ethers.parseEther("1.9");
+
+            await expect(
+                socialLending.connect(borrower).requestLoan(
+                    loanAmount,
+                    500,
+                    30 * 86400,
+                    feeTokenAddr,
+                    sentCollateral
+                )
+            )
+                .to.emit(socialLending, "LoanRequested")
+                .withArgs(0, borrower.address, loanAmount, 500, 30 * 86400, feeTokenAddr, expectedReceived);
+
+            const loan = await socialLending.loans(0);
+            expect(loan.collateralAmount).to.equal(expectedReceived);
+            expect(await socialLending.lockedCollateral(feeTokenAddr)).to.equal(expectedReceived);
+            expect(await feeToken.balanceOf(await socialLending.getAddress())).to.equal(expectedReceived);
+
+            // Cancel loan and verify lockedCollateral and contract balance both return to 0
+            await socialLending.connect(borrower).cancelLoanRequest(0);
+            expect(await socialLending.lockedCollateral(feeTokenAddr)).to.equal(0);
+            expect(await feeToken.balanceOf(await socialLending.getAddress())).to.equal(0);
+        });
+
+        it("should keep lockedCollateral consistent through fund and full repay", async function () {
+            const loanAmount = ethers.parseEther("1");
+            const sentCollateral = ethers.parseEther("2");
+            const expectedReceived = ethers.parseEther("1.9");
+
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                500,
+                30 * 86400,
+                feeTokenAddr,
+                sentCollateral
+            );
+            await socialLending.connect(lender).fundLoan(0, { value: loanAmount });
+            const loan = await socialLending.loans(0);
+            await socialLending.connect(borrower).repayLoan(0, { value: loan.remainingRepaymentAmount });
+
+            expect(await socialLending.lockedCollateral(feeTokenAddr)).to.equal(0);
+            expect(await feeToken.balanceOf(await socialLending.getAddress())).to.equal(0);
+            expect(loan.collateralAmount).to.equal(expectedReceived);
+        });
+
+        it("should revert with InsufficientCollateralValue when post-fee amount is below requirement", async function () {
+            const loanAmount = ethers.parseEther("1");
+            // 1.55 tokens sent => 5% fee => 1.4725 tokens received (< 1.5 required)
+            const sentCollateral = ethers.parseEther("1.55");
+
+            await expect(
+                socialLending.connect(borrower).requestLoan(
+                    loanAmount,
+                    500,
+                    30 * 86400,
+                    feeTokenAddr,
+                    sentCollateral
+                )
+            ).to.be.revertedWithCustomError(socialLending, "InsufficientCollateralValue");
+        });
+
+        it("should revert with InvalidCollateral when 100% fee results in 0 received tokens", async function () {
+            const FeeTokenFactory = await ethers.getContractFactory("MockFeeOnTransferERC20");
+            const fullFeeToken = await FeeTokenFactory.deploy("Full Fee", "FF", 10000, owner.address);
+            const fullFeeAddr = await fullFeeToken.getAddress();
+
+            await socialLending.setCollateralTokenStatus(fullFeeAddr, true);
+            await socialLending.setCollateralTokenDecimals(fullFeeAddr, 18);
+            await socialLending.setPriceFeed(fullFeeAddr, await mockPriceFeed.getAddress());
+
+            await fullFeeToken.mint(borrower.address, ethers.parseEther("10"));
+            await fullFeeToken.connect(borrower).approve(await socialLending.getAddress(), ethers.parseEther("10"));
+
+            await expect(
+                socialLending.connect(borrower).requestLoan(
+                    ethers.parseEther("1"),
+                    500,
+                    30 * 86400,
+                    fullFeeAddr,
+                    ethers.parseEther("2")
+                )
+            ).to.be.revertedWithCustomError(socialLending, "InvalidCollateral");
+        });
+    });
+
     describe("Pull-Payment ETH Fallback & Rescue Protection (Issue #10)", function () {
         let revertingReceiver;
 
