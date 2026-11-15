@@ -22,8 +22,7 @@ jobs:
             if (r.functions.pct < 100) fail.push('Functions: ' + r.functions.pct + '% < 100%');
             if (fail.length) {
               console.error('Coverage below threshold:\n' + fail.join('\n'));
-              // TODO: Enable strict check after coverage improvements in PR-05
-              // process.exit(1);
+              process.exit(1);
             } else {
               console.log('All coverage thresholds passed');
             }
