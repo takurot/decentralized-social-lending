@@ -87,8 +87,9 @@ describe("Edge Cases", function () {
         const loanId = 0;
         await socialLending.connect(lender).fundLoan(loanId, { value: LOAN_AMOUNT });
 
-        // Advance time
-        await ethers.provider.send("evm_increaseTime", [duration + 1]);
+        // Advance time past duration + grace period
+        const grace = await socialLending.gracePeriod();
+        await ethers.provider.send("evm_increaseTime", [duration + Number(grace) + 1]);
         await ethers.provider.send("evm_mine");
 
         // Other user calls it
