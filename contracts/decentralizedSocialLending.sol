@@ -36,9 +36,12 @@ error Unauthorized();
 error TooManyActiveLoans();
 error LoanTooLarge();
 error InsufficientUnlockedCollateral();
+error InvalidOfferId();
+error OfferExpired();
+error OfferNotExpired();
+error InsufficientUnlockedETH();
 error CollateralSufficient();
 error NoDebtToLiquidate();
-error InsufficientUnlockedETH();
 error TokenDecimalsNotSet();
 
 contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
@@ -56,6 +59,22 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     // ローンの状態を表す列挙型
     enum LoanState { Requested, Funded, Repaid, Defaulted, Cancelled, Liquidated }
+
+    // ローンオファーの状態を表す列挙型
+    enum OfferState { Created, Accepted, Cancelled, Expired }
+
+    struct LoanOffer {
+        address payable lender;
+        uint256 principalAmount;
+        uint256 maxInterestRate;
+        uint256 minDuration;
+        uint256 maxDuration;
+        address requiredCollateralToken;
+        uint256 minCollateralRatio;
+        OfferState state;
+        uint256 createdAt;
+        uint256 expiresAt;
+    }
 
     // ローンの構造体
     struct Loan {
@@ -125,6 +144,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     // 担保トークンごとのロック済み残高
     mapping(address => uint256) public lockedCollateral;
 
+    // ローンオファー関連のストレージ
+    mapping(uint256 => LoanOffer) public loanOffers;
+    uint256 public offerCount;
+
     // 保留中のETH引き出し残高（Pull-paymentフォールバック）とロック済みETH
     mapping(address => uint256) public pendingETHWithdrawals;
     uint256 public lockedETH;
@@ -180,6 +203,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     event MaxActiveLoansPerBorrowerUpdated(uint256 newMax);
     event MaxLoanAmountUpdated(uint256 newMaxAmount);
+    event LoanOfferCreated(uint256 indexed offerId, address indexed lender, uint256 amount, uint256 maxInterestRate);
+    event LoanOfferAccepted(uint256 indexed offerId, uint256 indexed loanId, address indexed borrower);
+    event LoanOfferCancelled(uint256 indexed offerId);
+    event LoanOfferExpired(uint256 indexed offerId);
     event ReputationUpdated(address indexed user, uint256 totalLoans, uint256 repaidLoans, uint256 defaultedLoans);
     event GracePeriodUpdated(uint256 newGracePeriod);
     event LiquidationThresholdUpdated(uint256 newThreshold);
@@ -270,6 +297,12 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     // 修飾子: 有効なローンIDかチェック
     modifier validLoanId(uint256 loanId) {
         if (loanId >= loanCount) revert InvalidLoanId();
+        _;
+    }
+
+    // 修飾子: 有効なオファーIDかチェック
+    modifier validOfferId(uint256 offerId) {
+        if (offerId >= offerCount) revert InvalidOfferId();
         _;
     }
 
@@ -870,10 +903,154 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         emit TokensRescued(token, amount, to);
     }
 
+    /**
+     * @notice Creates a lender-initiated loan offer by escrowing ETH
+     */
+    function createLoanOffer(
+        uint256 maxInterestRate,
+        uint256 minDuration,
+        uint256 maxDuration,
+        address requiredCollateralToken,
+        uint256 minCollateralRatio
+    ) external payable nonReentrant whenNotPaused {
+        if (msg.value == 0) revert InvalidAmount();
+        if (msg.value > maxLoanAmount) revert LoanTooLarge();
+        if (maxInterestRate == 0 || maxInterestRate > MAX_INTEREST_RATE) revert InvalidInterestRate();
+        if (minDuration == 0 || maxDuration > MAX_LOAN_DURATION || minDuration > maxDuration) revert InvalidDuration();
+        if (minCollateralRatio < MIN_COLLATERAL_RATIO || minCollateralRatio > MAX_COLLATERAL_RATIO) {
+            revert InvalidParameter();
+        }
+        if (requiredCollateralToken != address(0) && !allowedCollateralTokens[requiredCollateralToken]) {
+            revert TokenNotAllowed();
+        }
+
+        uint256 offerId = offerCount++;
+        lockedETH += msg.value;
+        loanOffers[offerId] = LoanOffer({
+            lender: payable(msg.sender),
+            principalAmount: msg.value,
+            maxInterestRate: maxInterestRate,
+            minDuration: minDuration,
+            maxDuration: maxDuration,
+            requiredCollateralToken: requiredCollateralToken,
+            minCollateralRatio: minCollateralRatio,
+            state: OfferState.Created,
+            createdAt: block.timestamp,
+            expiresAt: block.timestamp + 30 days
+        });
+
+        emit LoanOfferCreated(offerId, msg.sender, msg.value, maxInterestRate);
+    }
+
+    /**
+     * @notice Cancels an open loan offer and refunds ETH to the lender
+     */
+    function cancelLoanOffer(uint256 offerId) external nonReentrant validOfferId(offerId) {
+        LoanOffer storage offer = loanOffers[offerId];
+        if (msg.sender != offer.lender) revert Unauthorized();
+        if (offer.state != OfferState.Created) revert InvalidLoanState();
+
+        offer.state = OfferState.Cancelled;
+        lockedETH -= offer.principalAmount;
+        offer.lender.sendValue(offer.principalAmount);
+        emit LoanOfferCancelled(offerId);
+    }
+
+    /**
+     * @notice Accepts an open loan offer by depositing collateral and creating a funded loan
+     */
+    function acceptLoanOffer(
+        uint256 offerId,
+        uint256 interestRate,
+        uint256 duration,
+        address collateralToken,
+        uint256 collateralAmount
+    ) external nonReentrant validOfferId(offerId) whenNotPaused {
+        LoanOffer storage offer = loanOffers[offerId];
+        if (offer.state != OfferState.Created) revert InvalidLoanState();
+        if (block.timestamp > offer.expiresAt) revert OfferExpired();
+        if (msg.sender == offer.lender) revert SelfFunding();
+        if (borrowerActiveLoans[msg.sender] >= maxActiveLoansPerBorrower) revert TooManyActiveLoans();
+        if (interestRate == 0 || interestRate > offer.maxInterestRate) revert InvalidInterestRate();
+        if (duration < offer.minDuration || duration > offer.maxDuration) revert InvalidDuration();
+        if (collateralAmount == 0) revert InvalidCollateral();
+        if (collateralToken == address(0)) revert InvalidAddress();
+        if (!allowedCollateralTokens[collateralToken]) revert TokenNotAllowed();
+        if (offer.requiredCollateralToken != address(0) && collateralToken != offer.requiredCollateralToken) {
+            revert TokenNotAllowed();
+        }
+
+        {
+            uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, collateralAmount);
+            uint256 effectiveRatio = offer.minCollateralRatio > collateralRatio
+                ? offer.minCollateralRatio
+                : collateralRatio;
+            uint256 requiredCollateralValueInETH = Math.mulDiv(offer.principalAmount, effectiveRatio, BASIS_POINTS);
+            if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
+        }
+
+        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
+        lockedCollateral[collateralToken] += collateralAmount;
+
+        offer.state = OfferState.Accepted;
+        uint256 principal = offer.principalAmount;
+        lockedETH -= principal;
+
+        uint256 loanId = loanCount++;
+        {
+            uint256 annualInterest = Math.mulDiv(principal, interestRate, BASIS_POINTS);
+            uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
+            uint256 repaymentAmount = principal + interestAmount;
+
+            loans[loanId] = Loan({
+                borrower: payable(msg.sender),
+                lender: offer.lender,
+                principalAmount: principal,
+                interestRate: uint16(interestRate),
+                repaymentAmount: repaymentAmount,
+                duration: duration,
+                startTime: block.timestamp,
+                state: LoanState.Funded,
+                collateralToken: collateralToken,
+                collateralAmount: collateralAmount,
+                remainingRepaymentAmount: repaymentAmount
+            });
+        }
+
+        borrowerActiveLoans[msg.sender]++;
+        lenderActiveLoans[offer.lender]++;
+        activeLoansCount++;
+        _borrowerLoanIds[msg.sender].push(loanId);
+        _lenderLoanIds[offer.lender].push(loanId);
+
+        uint256 feeAmount = principal * platformFee / BASIS_POINTS;
+        uint256 amountToBorrower = principal - feeAmount;
+        payable(feeRecipient).sendValue(feeAmount);
+        payable(msg.sender).sendValue(amountToBorrower);
+
+        emit LoanOfferAccepted(offerId, loanId, msg.sender);
+    }
+
+    /**
+     * @notice Expires a past-due loan offer and refunds ETH to the lender
+     */
+    function expireLoanOffer(uint256 offerId) external nonReentrant validOfferId(offerId) {
+        LoanOffer storage offer = loanOffers[offerId];
+        if (offer.state != OfferState.Created) revert InvalidLoanState();
+        if (block.timestamp <= offer.expiresAt) revert OfferNotExpired();
+
+        offer.state = OfferState.Expired;
+        lockedETH -= offer.principalAmount;
+        offer.lender.sendValue(offer.principalAmount);
+        emit LoanOfferExpired(offerId);
+    }
+
     // 緊急時にETHを回収する関数（管理者用）
     function rescueETH(uint256 amount, address to) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidAddress();
-        if (address(this).balance < lockedETH + amount) revert InsufficientUnlockedETH();
+        if (address(this).balance < lockedETH || amount > address(this).balance - lockedETH) {
+            revert InsufficientUnlockedETH();
+        }
         payable(to).sendValue(amount);
         emit ETHRescued(amount, to);
     }
