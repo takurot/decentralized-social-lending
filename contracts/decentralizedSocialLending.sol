@@ -35,6 +35,7 @@ error Unauthorized();
 error TooManyActiveLoans();
 error LoanTooLarge();
 error InsufficientUnlockedCollateral();
+error InsufficientUnlockedETH();
 
 contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     using SafeERC20 for IERC20;
@@ -118,6 +119,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     // 担保トークンごとのロック済み残高
     mapping(address => uint256) public lockedCollateral;
 
+    // 保留中のETH引き出し残高（Pull-paymentフォールバック）とロック済みETH
+    mapping(address => uint256) public pendingETHWithdrawals;
+    uint256 public lockedETH;
+
     // 借入制限
     uint256 public maxLoanAmount = 10 ether;
     uint256 public maxActiveLoansPerBorrower = 3;
@@ -152,6 +157,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     event MaxActiveLoansPerBorrowerUpdated(uint256 newMax);
     event MaxLoanAmountUpdated(uint256 newMaxAmount);
+    event ETHWithdrawalQueued(address indexed recipient, uint256 amount);
+    event ETHWithdrawn(address indexed recipient, uint256 amount);
+    event TokensRescued(address indexed token, uint256 amount, address indexed to);
+    event ETHRescued(uint256 amount, address indexed to);
 
     /**
      * @notice Constructor to initialize the contract with the fee recipient
@@ -385,11 +394,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 feeAmount = msg.value * platformFee / BASIS_POINTS;
         uint256 amountToBorrower = msg.value - feeAmount;
 
-        // 手数料送金
-        payable(feeRecipient).sendValue(feeAmount);
+        // 手数料送金（失敗時はPull-paymentキューへ退避）
+        _safeTransferETHOrQueue(feeRecipient, feeAmount);
 
-        // 借り手への送金
-        loan.borrower.sendValue(amountToBorrower);
+        // 借り手への送金（失敗時はPull-paymentキューへ退避）
+        _safeTransferETHOrQueue(loan.borrower, amountToBorrower);
 
         emit LoanFunded(loanId, msg.sender);
     }
@@ -430,12 +439,37 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             emit LoanPartiallyRepaid(loanId, loan.borrower, amount, loan.remainingRepaymentAmount);
         }
 
-        // 貸し手への送金
-        loan.lender.sendValue(amount);
+        // 貸し手への送金（失敗時はPull-paymentキューへ退避）
+        _safeTransferETHOrQueue(loan.lender, amount);
 
-        // 余剰分を借り手に返却
+        // 余剰分を借り手に返却（失敗時はPull-paymentキューへ退避）
         if (excessAmount > 0) {
-            loan.borrower.sendValue(excessAmount);
+            _safeTransferETHOrQueue(loan.borrower, excessAmount);
+        }
+    }
+
+    /**
+     * @notice Withdraws queued ETH that failed direct push transfer
+     */
+    function withdrawETH() external nonReentrant {
+        uint256 amount = pendingETHWithdrawals[msg.sender];
+        if (amount == 0) revert InvalidAmount();
+        pendingETHWithdrawals[msg.sender] = 0;
+        lockedETH -= amount;
+        payable(msg.sender).sendValue(amount);
+        emit ETHWithdrawn(msg.sender, amount);
+    }
+
+    /**
+     * @dev Attempts bounded-gas ETH transfer and falls back to pull-payment queue on failure.
+     */
+    function _safeTransferETHOrQueue(address to, uint256 amount) internal {
+        if (amount == 0) return;
+        (bool success, ) = payable(to).call{value: amount, gas: 50_000}("");
+        if (!success) {
+            pendingETHWithdrawals[to] += amount;
+            lockedETH += amount;
+            emit ETHWithdrawalQueued(to, amount);
         }
     }
 
@@ -660,11 +694,14 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 locked = lockedCollateral[token];
         if (contractBalance < locked + amount) revert InsufficientUnlockedCollateral();
         IERC20(token).safeTransfer(to, amount);
+        emit TokensRescued(token, amount, to);
     }
 
     // 緊急時にETHを回収する関数（管理者用）
-    function rescueETH(uint256 amount, address to) external onlyOwner {
+    function rescueETH(uint256 amount, address to) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidAddress();
+        if (address(this).balance < lockedETH + amount) revert InsufficientUnlockedETH();
         payable(to).sendValue(amount);
+        emit ETHRescued(amount, to);
     }
 }

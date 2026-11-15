@@ -183,4 +183,126 @@ describe("SocialLendingWithCollateral Security", function () {
             expect(loan.repaymentAmount).to.equal(expectedRepayment);
         });
     });
+
+    describe("Pull-Payment ETH Fallback & Rescue Protection (Issue #10)", function () {
+        let revertingReceiver;
+
+        beforeEach(async function () {
+            const RevertingFactory = await ethers.getContractFactory("MockRevertingReceiver");
+            revertingReceiver = await RevertingFactory.deploy();
+        });
+
+        it("should queue repayment ETH instead of reverting when lender rejects ETH", async function () {
+            const loanAmount = ethers.parseEther("1");
+            const collateralAmount = ethers.parseEther("0.002");
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                500,
+                30 * 86400,
+                await mockToken.getAddress(),
+                collateralAmount
+            );
+
+            // RevertingReceiver funds the loan
+            const fundData = socialLending.interface.encodeFunctionData("fundLoan", [0]);
+            await revertingReceiver.callContract(await socialLending.getAddress(), fundData, { value: loanAmount });
+
+            const loan = await socialLending.loans(0);
+            const receiverAddr = await revertingReceiver.getAddress();
+
+            // Borrower repays in full; lender reverts on ETH receive, so ETH is queued
+            await expect(
+                socialLending.connect(borrower).repayLoan(0, { value: loan.remainingRepaymentAmount })
+            )
+                .to.emit(socialLending, "ETHWithdrawalQueued")
+                .withArgs(receiverAddr, loan.remainingRepaymentAmount);
+
+            const updatedLoan = await socialLending.loans(0);
+            expect(updatedLoan.state).to.equal(2); // Repaid
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(loan.remainingRepaymentAmount);
+            expect(await socialLending.lockedETH()).to.equal(loan.remainingRepaymentAmount);
+
+            // rescueETH must not withdraw lockedETH
+            await expect(
+                socialLending.connect(owner).rescueETH(1n, owner.address)
+            ).to.be.revertedWithCustomError(socialLending, "InsufficientUnlockedETH");
+
+            // Lender disables revert and withdraws queued ETH even while paused
+            await revertingReceiver.setShouldRevert(false);
+            await socialLending.connect(owner).pause();
+            const withdrawData = socialLending.interface.encodeFunctionData("withdrawETH", []);
+            await revertingReceiver.callContract(await socialLending.getAddress(), withdrawData);
+
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(0);
+            expect(await socialLending.lockedETH()).to.equal(0);
+            expect(await ethers.provider.getBalance(receiverAddr)).to.equal(loan.remainingRepaymentAmount);
+        });
+
+        it("should not allow a gas-burning lender to DoS repayLoan", async function () {
+            const loanAmount = ethers.parseEther("1");
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                500,
+                30 * 86400,
+                await mockToken.getAddress(),
+                ethers.parseEther("0.002")
+            );
+            const fundData = socialLending.interface.encodeFunctionData("fundLoan", [0]);
+            await revertingReceiver.callContract(await socialLending.getAddress(), fundData, { value: loanAmount });
+
+            await revertingReceiver.setBurnGas(true);
+            const loan = await socialLending.loans(0);
+            await expect(
+                socialLending.connect(borrower).repayLoan(0, { value: loan.remainingRepaymentAmount })
+            ).to.not.be.reverted;
+            expect(await socialLending.pendingETHWithdrawals(await revertingReceiver.getAddress())).to.equal(
+                loan.remainingRepaymentAmount
+            );
+        });
+
+        it("should queue fee ETH when feeRecipient reverts on receive", async function () {
+            const receiverAddr = await revertingReceiver.getAddress();
+            await socialLending.connect(owner).setFeeRecipient(receiverAddr);
+
+            const loanAmount = ethers.parseEther("1");
+            await socialLending.connect(borrower).requestLoan(
+                loanAmount,
+                500,
+                30 * 86400,
+                await mockToken.getAddress(),
+                ethers.parseEther("0.002")
+            );
+
+            const expectedFee = (loanAmount * 100n) / 10000n;
+            await expect(socialLending.connect(lender).fundLoan(0, { value: loanAmount }))
+                .to.emit(socialLending, "ETHWithdrawalQueued")
+                .withArgs(receiverAddr, expectedFee);
+
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(expectedFee);
+            expect(await socialLending.lockedETH()).to.equal(expectedFee);
+        });
+
+        it("should revert withdrawETH when pending balance is 0", async function () {
+            await expect(socialLending.connect(lender).withdrawETH())
+                .to.be.revertedWithCustomError(socialLending, "InvalidAmount");
+        });
+
+        it("should emit TokensRescued and ETHRescued events", async function () {
+            const extraTokens = ethers.parseEther("1");
+            await mockToken.mint(await socialLending.getAddress(), extraTokens);
+            await expect(
+                socialLending.connect(owner).rescueTokens(await mockToken.getAddress(), extraTokens, owner.address)
+            )
+                .to.emit(socialLending, "TokensRescued")
+                .withArgs(await mockToken.getAddress(), extraTokens, owner.address);
+
+            const extraETH = ethers.parseEther("0.5");
+            await owner.sendTransaction({ to: await socialLending.getAddress(), value: extraETH });
+            await expect(
+                socialLending.connect(owner).rescueETH(extraETH, owner.address)
+            )
+                .to.emit(socialLending, "ETHRescued")
+                .withArgs(extraETH, owner.address);
+        });
+    });
 });
