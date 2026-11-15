@@ -102,6 +102,7 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
             // Forward time past duration + 3-day grace period
             await ethers.provider.send("evm_increaseTime", [DURATION + 3 * 86400 + 1]);
             await ethers.provider.send("evm_mine");
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
             await socialLending.connect(lender).declareDefault(3);
 
             // Update price feed to avoid StaleData

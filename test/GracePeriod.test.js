@@ -54,10 +54,10 @@ describe("Grace Period (PR-06)", function () {
         const grace = await socialLending.gracePeriod();
         await ethers.provider.send("evm_increaseTime", [DURATION + Number(grace) + 1]);
         await ethers.provider.send("evm_mine");
+        await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
 
         await expect(socialLending.connect(lender).declareDefault(0))
-            .to.emit(socialLending, "DefaultDeclared")
-            .withArgs(0, lender.address);
+            .to.emit(socialLending, "DefaultDeclared");
 
         const loan = await socialLending.loans(0);
         expect(loan.state).to.equal(3); // Defaulted
@@ -75,5 +75,71 @@ describe("Grace Period (PR-06)", function () {
             .to.emit(socialLending, "GracePeriodUpdated")
             .withArgs(7 * 86400);
         expect(await socialLending.gracePeriod()).to.equal(7 * 86400);
+    });
+
+    it("should return surplus collateral to borrower on over-collateralized declareDefault", async function () {
+        const grace = await socialLending.gracePeriod();
+        await ethers.provider.send("evm_increaseTime", [DURATION + Number(grace) + 1]);
+        await ethers.provider.send("evm_mine");
+        await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
+
+        const loanBefore = await socialLending.loans(0);
+        const borrowerBefore = await mockToken.balanceOf(borrower.address);
+        const lenderBefore = await mockToken.balanceOf(lender.address);
+
+        const tx = await socialLending.connect(lender).declareDefault(0);
+        const receipt = await tx.wait();
+        const ev = receipt.logs
+            .map((l) => { try { return socialLending.interface.parseLog(l); } catch { return null; } })
+            .find((p) => p && p.name === "DefaultDeclared");
+
+        expect(ev.args.seizedCollateral + ev.args.surplusCollateral).to.equal(loanBefore.collateralAmount);
+        expect(ev.args.surplusCollateral).to.be.gt(0n);
+
+        const borrowerAfter = await mockToken.balanceOf(borrower.address);
+        const lenderAfter = await mockToken.balanceOf(lender.address);
+        expect(lenderAfter - lenderBefore).to.equal(ev.args.seizedCollateral);
+        expect(borrowerAfter - borrowerBefore).to.equal(ev.args.surplusCollateral);
+        expect(lenderAfter - lenderBefore).to.be.gte(loanBefore.remainingRepaymentAmount);
+    });
+
+    it("should return surplus collateral to borrower on over-collateralized checkAndDeclareDefault", async function () {
+        const grace = await socialLending.gracePeriod();
+        await ethers.provider.send("evm_increaseTime", [DURATION + Number(grace) + 1]);
+        await ethers.provider.send("evm_mine");
+        await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
+
+        const loanBefore = await socialLending.loans(0);
+        const borrowerBefore = await mockToken.balanceOf(borrower.address);
+        const lenderBefore = await mockToken.balanceOf(lender.address);
+
+        const tx = await socialLending.connect(other).checkAndDeclareDefault(0);
+        const receipt = await tx.wait();
+        const ev = receipt.logs
+            .map((l) => { try { return socialLending.interface.parseLog(l); } catch { return null; } })
+            .find((p) => p && p.name === "DefaultDeclared");
+
+        expect(ev.args.seizedCollateral + ev.args.surplusCollateral).to.equal(loanBefore.collateralAmount);
+        expect(ev.args.surplusCollateral).to.be.gt(0n);
+        expect((await mockToken.balanceOf(lender.address)) - lenderBefore).to.equal(ev.args.seizedCollateral);
+        expect((await mockToken.balanceOf(borrower.address)) - borrowerBefore).to.equal(ev.args.surplusCollateral);
+    });
+
+    it("should seize full collateral with zero surplus when under-collateralized on default", async function () {
+        const grace = await socialLending.gracePeriod();
+        await ethers.provider.send("evm_increaseTime", [DURATION + Number(grace) + 1]);
+        await ethers.provider.send("evm_mine");
+        // Drop price so 2 MOCK = 0.8 ETH < ~1.05 ETH debt+bonus
+        await mockPriceFeed.setLatestPrice(ethers.parseUnits("0.4", 8));
+
+        const borrowerBefore = await mockToken.balanceOf(borrower.address);
+        const lenderBefore = await mockToken.balanceOf(lender.address);
+
+        await expect(socialLending.connect(lender).declareDefault(0))
+            .to.emit(socialLending, "DefaultDeclared")
+            .withArgs(0, lender.address, COLLATERAL_AMOUNT, 0n);
+
+        expect((await mockToken.balanceOf(lender.address)) - lenderBefore).to.equal(COLLATERAL_AMOUNT);
+        expect(await mockToken.balanceOf(borrower.address)).to.equal(borrowerBefore);
     });
 });
