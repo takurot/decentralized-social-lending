@@ -315,8 +315,8 @@ describe("SocialLendingWithCollateral", function () {
     it("期限切れ後に貸し手がデフォルトを宣言できること", async function () {
       const loanId = 0;
 
-      // 時間を進める
-      await ethers.provider.send("evm_increaseTime", [31 * 24 * 60 * 60]); // 31日
+      // 時間を進める (期間30日 + 猶予期間3日)
+      await ethers.provider.send("evm_increaseTime", [34 * 24 * 60 * 60]); // 34日
       await ethers.provider.send("evm_mine");
 
       await expect(
