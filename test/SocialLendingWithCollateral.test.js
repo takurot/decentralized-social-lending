@@ -315,8 +315,8 @@ describe("SocialLendingWithCollateral", function () {
     it("should allow lender to declare default after expiration", async function () {
       const loanId = 0;
 
-      // Advance block timestamp
-      await ethers.provider.send("evm_increaseTime", [31 * 24 * 60 * 60]); // 31 days
+      // Advance block timestamp (30-day duration + 3-day grace period)
+      await ethers.provider.send("evm_increaseTime", [34 * 24 * 60 * 60]); // 34 days
       await ethers.provider.send("evm_mine");
 
       await expect(
