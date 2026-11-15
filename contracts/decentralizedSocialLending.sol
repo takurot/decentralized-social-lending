@@ -128,6 +128,18 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     uint256 public constant MIN_COLLATERAL_RATIO = 10000; // 100%
     uint256 public constant MAX_COLLATERAL_RATIO = 20000; // 200%
 
+    // 信用スコア・レピュテーション構造体
+    struct UserReputation {
+        uint256 totalLoans;
+        uint256 repaidLoans;
+        uint256 defaultedLoans;
+        uint256 totalBorrowedAmount;
+        uint256 totalRepaidAmount;
+        uint256 lastActivityTimestamp;
+    }
+
+    mapping(address => UserReputation) public userReputations;
+
     // イベントの定義
     event LoanRequested(
         uint256 indexed loanId,
@@ -152,6 +164,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     event MaxActiveLoansPerBorrowerUpdated(uint256 newMax);
     event MaxLoanAmountUpdated(uint256 newMaxAmount);
+    event ReputationUpdated(address indexed user, uint256 totalLoans, uint256 repaidLoans, uint256 defaultedLoans);
 
     /**
      * @notice Constructor to initialize the contract with the fee recipient
@@ -381,6 +394,12 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         activeLoansCount++;
         _lenderLoanIds[msg.sender].push(loanId);
 
+        UserReputation storage rep = userReputations[loan.borrower];
+        rep.totalLoans++;
+        rep.totalBorrowedAmount += loan.principalAmount;
+        rep.lastActivityTimestamp = block.timestamp;
+        emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+
         // プラットフォーム手数料の計算と送金
         uint256 feeAmount = msg.value * platformFee / BASIS_POINTS;
         uint256 amountToBorrower = msg.value - feeAmount;
@@ -407,6 +426,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 excessAmount = 0;
 
         // 状態変更を先に行う（再入攻撃対策）
+        UserReputation storage rep = userReputations[loan.borrower];
         if (amount >= loan.remainingRepaymentAmount) {
             // 全額返済
             excessAmount = amount - loan.remainingRepaymentAmount;
@@ -419,6 +439,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             activeLoansCount--;
             repaidLoansCount++;
 
+            rep.repaidLoans++;
+            rep.totalRepaidAmount += amount;
+            rep.lastActivityTimestamp = block.timestamp;
+            emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+
             // 担保の返却
             lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
             IERC20(loan.collateralToken).safeTransfer(loan.borrower, loan.collateralAmount);
@@ -427,6 +452,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         } else {
             // 部分返済
             loan.remainingRepaymentAmount -= amount;
+
+            rep.totalRepaidAmount += amount;
+            rep.lastActivityTimestamp = block.timestamp;
+            emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+
             emit LoanPartiallyRepaid(loanId, loan.borrower, amount, loan.remainingRepaymentAmount);
         }
 
@@ -458,6 +488,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         defaultedLoansCount++;
         liquidatedLoansCount++;
 
+        UserReputation storage rep = userReputations[loan.borrower];
+        rep.defaultedLoans++;
+        rep.lastActivityTimestamp = block.timestamp;
+        emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+
         // 担保の貸し手への移転
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
         IERC20(loan.collateralToken).safeTransfer(loan.lender, loan.collateralAmount);
@@ -483,6 +518,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         activeLoansCount--;
         defaultedLoansCount++;
         liquidatedLoansCount++;
+
+        UserReputation storage rep = userReputations[loan.borrower];
+        rep.defaultedLoans++;
+        rep.lastActivityTimestamp = block.timestamp;
+        emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
 
         // 担保の貸し手への移転
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
@@ -651,6 +691,29 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             cancelledLoansCount,
             liquidatedLoansCount
         );
+    }
+
+    /**
+     * @notice Calculates the credit score of a user in basis points (0-10000)
+     * @param user The address of the user
+     * @return score The calculated credit score
+     */
+    function getCreditScore(address user) external view returns (uint256 score) {
+        UserReputation storage rep = userReputations[user];
+        if (rep.totalLoans == 0) return 5000;
+
+        uint256 repaymentRatio = Math.mulDiv(rep.repaidLoans, BASIS_POINTS, rep.totalLoans);
+        uint256 volumeBonus = 0;
+        if (rep.totalRepaidAmount > 100 ether) {
+            volumeBonus = 1000;
+        } else if (rep.totalRepaidAmount > 10 ether) {
+            volumeBonus = 500;
+        }
+
+        score = repaymentRatio + volumeBonus;
+        if (score > BASIS_POINTS) {
+            score = BASIS_POINTS;
+        }
     }
 
     // 緊急時にトークンを回収する関数（管理者用）
