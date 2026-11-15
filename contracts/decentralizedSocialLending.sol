@@ -1085,12 +1085,22 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             revert TokenNotAllowed();
         }
 
+        uint256 principal = offer.principalAmount;
+        uint256 annualInterest = Math.mulDiv(principal, interestRate, BASIS_POINTS);
+        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
+        uint256 repaymentAmount = principal + interestAmount;
+
         {
             uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, collateralAmount);
             uint256 effectiveRatio = offer.minCollateralRatio > collateralRatio
                 ? offer.minCollateralRatio
                 : collateralRatio;
-            uint256 requiredCollateralValueInETH = Math.mulDiv(offer.principalAmount, effectiveRatio, BASIS_POINTS);
+            uint256 requiredCollateralValueInETH = Math.mulDiv(
+                repaymentAmount,
+                effectiveRatio,
+                BASIS_POINTS,
+                Math.Rounding.Up
+            );
             if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
         }
 
@@ -1098,29 +1108,22 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         lockedCollateral[collateralToken] += collateralAmount;
 
         offer.state = OfferState.Accepted;
-        uint256 principal = offer.principalAmount;
         lockedETH -= principal;
 
         uint256 loanId = loanCount++;
-        {
-            uint256 annualInterest = Math.mulDiv(principal, interestRate, BASIS_POINTS);
-            uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
-            uint256 repaymentAmount = principal + interestAmount;
-
-            loans[loanId] = Loan({
-                borrower: payable(msg.sender),
-                lender: offer.lender,
-                principalAmount: principal,
-                interestRate: uint16(interestRate),
-                repaymentAmount: repaymentAmount,
-                duration: duration,
-                startTime: block.timestamp,
-                state: LoanState.Funded,
-                collateralToken: collateralToken,
-                collateralAmount: collateralAmount,
-                remainingRepaymentAmount: repaymentAmount
-            });
-        }
+        loans[loanId] = Loan({
+            borrower: payable(msg.sender),
+            lender: offer.lender,
+            principalAmount: principal,
+            interestRate: uint16(interestRate),
+            repaymentAmount: repaymentAmount,
+            duration: duration,
+            startTime: block.timestamp,
+            state: LoanState.Funded,
+            collateralToken: collateralToken,
+            collateralAmount: collateralAmount,
+            remainingRepaymentAmount: repaymentAmount
+        });
 
         borrowerActiveLoans[msg.sender]++;
         lenderActiveLoans[offer.lender]++;

@@ -493,4 +493,61 @@ describe("SocialLendingWithCollateral Security", function () {
             ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
         });
     });
+
+    describe("Loan Offer Repayment-Denominator Collateral Check (Issue #31)", function () {
+        const ONE_YEAR = 365 * 86400;
+
+        beforeEach(async function () {
+            // Set price: 1 MOCK = 1 ETH for exact 1:1 collateral math
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
+            await socialLending.connect(lender).createLoanOffer(
+                2000, // 20% max APR
+                86400, // minDuration: 1 day
+                ONE_YEAR, // maxDuration: 365 days
+                await mockToken.getAddress(), // requiredCollateralToken
+                15000, // minCollateralRatio: 150%
+                { value: ethers.parseEther("1") }
+            );
+        });
+
+        it("should revert with InsufficientCollateralValue when collateral covers only principal*ratio", async function () {
+            // 1 ETH * 150% = 1.5 ETH, but repayment is 1.2 ETH so 150% of repayment = 1.8 ETH
+            await expect(
+                socialLending.connect(borrower).acceptLoanOffer(
+                    0,
+                    2000,
+                    ONE_YEAR,
+                    await mockToken.getAddress(),
+                    ethers.parseEther("1.5")
+                )
+            ).to.be.revertedWithCustomError(socialLending, "InsufficientCollateralValue");
+        });
+
+        it("should succeed with exact repayment-basis collateral and maintain >= 150% ratio", async function () {
+            await socialLending.connect(borrower).acceptLoanOffer(
+                0,
+                2000,
+                ONE_YEAR,
+                await mockToken.getAddress(),
+                ethers.parseEther("1.8")
+            );
+
+            const ratio = await socialLending.getCollateralizationRatio(0);
+            expect(ratio).to.be.gte(15000n);
+        });
+
+        it("should prevent immediate day-one liquidation on an accepted offer", async function () {
+            await socialLending.connect(borrower).acceptLoanOffer(
+                0,
+                2000,
+                ONE_YEAR,
+                await mockToken.getAddress(),
+                ethers.parseEther("1.8")
+            );
+
+            await expect(
+                socialLending.connect(lender).liquidate(0)
+            ).to.be.revertedWithCustomError(socialLending, "CollateralSufficient");
+        });
+    });
 });
