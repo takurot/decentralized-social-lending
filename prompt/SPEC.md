@@ -393,6 +393,8 @@ if (block.timestamp <= loan.startTime + loan.duration) revert LoanNotExpired();
 if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
 ```
 
+`declareDefault` / `checkAndDeclareDefault` の担保清算は §4.2（`liquidate`）と同様に、残債務 × `(1 + liquidationBonus)` 相当の担保のみを貸し手へ移転し、余剰担保は借り手へ返却する（`DefaultDeclared(loanId, lender, seizedCollateral, surplusCollateral)`）。
+
 ---
 
 ### 4.2 清算メカニズム（Liquidation）の導入（**High / P1**）

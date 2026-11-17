@@ -214,7 +214,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     event LoanFunded(uint256 indexed loanId, address indexed lender);
     event LoanPartiallyRepaid(uint256 indexed loanId, address indexed borrower, uint256 amountRepaid, uint256 remainingAmount);
     event LoanRepaid(uint256 indexed loanId, address indexed borrower, address indexed lender, uint256 repaymentAmount);
-    event DefaultDeclared(uint256 indexed loanId, address indexed lender);
+    event DefaultDeclared(uint256 indexed loanId, address indexed lender, uint256 seizedCollateral, uint256 surplusCollateral);
     event LoanCancelled(uint256 indexed loanId, address indexed borrower);
     event PriceFeedUpdated(address indexed token, address indexed priceFeed);
     event PlatformFeeUpdated(uint256 newFee);
@@ -608,28 +608,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param loanId The ID of the loan to declare default
      */
     function declareDefault(uint256 loanId) external nonReentrant validLoanId(loanId) onlyLender(loanId) whenNotPaused {
-        Loan storage loan = loans[loanId];
-        if (loan.state != LoanState.Funded) revert InvalidLoanState();
-        if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
-
-        // Update state before external calls (Checks-Effects-Interactions)
-        loan.state = LoanState.Defaulted;
-        borrowerActiveLoans[loan.borrower]--;
-        lenderActiveLoans[loan.lender]--;
-
-        activeLoansCount--;
-        defaultedLoansCount++;
-
-        UserReputation storage rep = userReputations[loan.borrower];
-        rep.defaultedLoans++;
-        rep.lastActivityTimestamp = block.timestamp;
-        emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
-
-        // Transfer collateral to lender
-        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
-        IERC20(loan.collateralToken).safeTransfer(loan.lender, loan.collateralAmount);
-
-        emit DefaultDeclared(loanId, loan.lender);
+        _executeDefault(loanId);
     }
 
     /**
@@ -637,11 +616,26 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param loanId The ID of the loan to check and declare default
      */
     function checkAndDeclareDefault(uint256 loanId) external nonReentrant validLoanId(loanId) whenNotPaused {
+        _executeDefault(loanId);
+    }
+
+    /**
+     * @dev Shared default settlement: seizes collateral covering remaining debt + liquidationBonus and returns any surplus to borrower.
+     */
+    function _executeDefault(uint256 loanId) internal {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
         if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
 
+        uint256 collateralValue = getCollateralValueInETH(loan.collateralToken, loan.collateralAmount);
+        uint256 seizeValue = Math.mulDiv(loan.remainingRepaymentAmount, BASIS_POINTS + liquidationBonus, BASIS_POINTS);
+        uint256 seizeAmount = seizeValue >= collateralValue
+            ? loan.collateralAmount
+            : Math.mulDiv(loan.collateralAmount, seizeValue, collateralValue);
+        uint256 surplusCollateral = loan.collateralAmount - seizeAmount;
+
         // Update state before external calls (Checks-Effects-Interactions)
+        loan.remainingRepaymentAmount = 0;
         loan.state = LoanState.Defaulted;
         borrowerActiveLoans[loan.borrower]--;
         lenderActiveLoans[loan.lender]--;
@@ -654,11 +648,13 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         rep.lastActivityTimestamp = block.timestamp;
         emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
 
-        // Transfer collateral to lender
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
-        IERC20(loan.collateralToken).safeTransfer(loan.lender, loan.collateralAmount);
+        IERC20(loan.collateralToken).safeTransfer(loan.lender, seizeAmount);
+        if (surplusCollateral > 0) {
+            IERC20(loan.collateralToken).safeTransfer(loan.borrower, surplusCollateral);
+        }
 
-        emit DefaultDeclared(loanId, loan.lender);
+        emit DefaultDeclared(loanId, loan.lender, seizeAmount, surplusCollateral);
     }
 
     /**
