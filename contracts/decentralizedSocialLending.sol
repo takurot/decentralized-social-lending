@@ -468,7 +468,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @notice Allows the borrower to cancel a loan request before it is funded
      * @param loanId The ID of the loan to cancel
      */
-    function cancelLoanRequest(uint256 loanId) external nonReentrant validLoanId(loanId) onlyBorrower(loanId) whenNotPaused {
+    function cancelLoanRequest(uint256 loanId) external nonReentrant validLoanId(loanId) onlyBorrower(loanId) {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Requested) revert InvalidLoanState();
 
