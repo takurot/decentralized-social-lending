@@ -205,7 +205,7 @@ function _consumeTimelock(bytes4 functionSelector, bytes memory params) internal
 }
 ```
 
-**対象関数**: `setPlatformFee`, `setFeeRecipient`, `setLTVRatio`, `setCollateralTokenStatus`
+**対象関数**: `setPlatformFee`, `setFeeRecipient`, `setCollateralRatio`（旧 `setLTVRatio`）, `setCollateralTokenStatus`, `setPriceFeed`, `setCollateralTokenDecimals`, `setGracePeriod`, `setLiquidationThreshold`
 
 > [!NOTE]
 > `pause()` はタイムロック対象外とする（緊急停止の即時性が必要なため）
@@ -392,6 +392,8 @@ if (block.timestamp <= loan.startTime + loan.duration) revert LoanNotExpired();
 // 変更後:
 if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
 ```
+
+`declareDefault` / `checkAndDeclareDefault` の担保清算は §4.2（`liquidate`）と同様に、残債務 × `(1 + liquidationBonus)` 相当の担保のみを貸し手へ移転し、余剰担保は借り手へ返却する（`DefaultDeclared(loanId, lender, seizedCollateral, surplusCollateral)`）。
 
 ---
 

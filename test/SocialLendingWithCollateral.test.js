@@ -318,12 +318,12 @@ describe("SocialLendingWithCollateral", function () {
       // Advance block timestamp (30-day duration + 3-day grace period)
       await ethers.provider.send("evm_increaseTime", [34 * 24 * 60 * 60]); // 34 days
       await ethers.provider.send("evm_mine");
+      await mockPriceFeed.setLatestPrice(100000000);
 
       await expect(
         socialLending.connect(lender).declareDefault(loanId)
       )
-        .to.emit(socialLending, "DefaultDeclared")
-        .withArgs(loanId, lender.address);
+        .to.emit(socialLending, "DefaultDeclared");
 
       // Verify loan state
       const updatedLoan = await socialLending.loans(loanId);

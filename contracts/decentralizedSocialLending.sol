@@ -214,7 +214,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     event LoanFunded(uint256 indexed loanId, address indexed lender);
     event LoanPartiallyRepaid(uint256 indexed loanId, address indexed borrower, uint256 amountRepaid, uint256 remainingAmount);
     event LoanRepaid(uint256 indexed loanId, address indexed borrower, address indexed lender, uint256 repaymentAmount);
-    event DefaultDeclared(uint256 indexed loanId, address indexed lender);
+    event DefaultDeclared(uint256 indexed loanId, address indexed lender, uint256 seizedCollateral, uint256 surplusCollateral);
     event LoanCancelled(uint256 indexed loanId, address indexed borrower);
     event PriceFeedUpdated(address indexed token, address indexed priceFeed);
     event PlatformFeeUpdated(uint256 newFee);
@@ -376,6 +376,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function setCollateralTokenDecimals(address token, uint8 decimals) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
         if (decimals > 18) revert InvalidParameter();
+        _consumeTimelock(msg.sig, abi.encode(token, decimals));
         collateralTokenDecimals[token] = decimals;
         collateralDecimalsSet[token] = true;
         emit CollateralTokenDecimalsUpdated(token, decimals);
@@ -388,6 +389,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      */
     function setPriceFeed(address token, address priceFeed) external onlyOwner {
         if (token == address(0) || priceFeed == address(0)) revert InvalidAddress();
+        _consumeTimelock(msg.sig, abi.encode(token, priceFeed));
         priceFeeds[token] = priceFeed;
         emit PriceFeedUpdated(token, priceFeed);
     }
@@ -466,7 +468,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @notice Allows the borrower to cancel a loan request before it is funded
      * @param loanId The ID of the loan to cancel
      */
-    function cancelLoanRequest(uint256 loanId) external nonReentrant validLoanId(loanId) onlyBorrower(loanId) whenNotPaused {
+    function cancelLoanRequest(uint256 loanId) external nonReentrant validLoanId(loanId) onlyBorrower(loanId) {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Requested) revert InvalidLoanState();
 
@@ -606,28 +608,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param loanId The ID of the loan to declare default
      */
     function declareDefault(uint256 loanId) external nonReentrant validLoanId(loanId) onlyLender(loanId) whenNotPaused {
-        Loan storage loan = loans[loanId];
-        if (loan.state != LoanState.Funded) revert InvalidLoanState();
-        if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
-
-        // Update state before external calls (Checks-Effects-Interactions)
-        loan.state = LoanState.Defaulted;
-        borrowerActiveLoans[loan.borrower]--;
-        lenderActiveLoans[loan.lender]--;
-
-        activeLoansCount--;
-        defaultedLoansCount++;
-
-        UserReputation storage rep = userReputations[loan.borrower];
-        rep.defaultedLoans++;
-        rep.lastActivityTimestamp = block.timestamp;
-        emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
-
-        // Transfer collateral to lender
-        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
-        IERC20(loan.collateralToken).safeTransfer(loan.lender, loan.collateralAmount);
-
-        emit DefaultDeclared(loanId, loan.lender);
+        _executeDefault(loanId);
     }
 
     /**
@@ -635,11 +616,26 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param loanId The ID of the loan to check and declare default
      */
     function checkAndDeclareDefault(uint256 loanId) external nonReentrant validLoanId(loanId) whenNotPaused {
+        _executeDefault(loanId);
+    }
+
+    /**
+     * @dev Shared default settlement: seizes collateral covering remaining debt + liquidationBonus and returns any surplus to borrower.
+     */
+    function _executeDefault(uint256 loanId) internal {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
         if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
 
+        uint256 collateralValue = getCollateralValueInETH(loan.collateralToken, loan.collateralAmount);
+        uint256 seizeValue = Math.mulDiv(loan.remainingRepaymentAmount, BASIS_POINTS + liquidationBonus, BASIS_POINTS);
+        uint256 seizeAmount = seizeValue >= collateralValue
+            ? loan.collateralAmount
+            : Math.mulDiv(loan.collateralAmount, seizeValue, collateralValue);
+        uint256 surplusCollateral = loan.collateralAmount - seizeAmount;
+
         // Update state before external calls (Checks-Effects-Interactions)
+        loan.remainingRepaymentAmount = 0;
         loan.state = LoanState.Defaulted;
         borrowerActiveLoans[loan.borrower]--;
         lenderActiveLoans[loan.lender]--;
@@ -652,11 +648,13 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         rep.lastActivityTimestamp = block.timestamp;
         emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
 
-        // Transfer collateral to lender
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
-        IERC20(loan.collateralToken).safeTransfer(loan.lender, loan.collateralAmount);
+        IERC20(loan.collateralToken).safeTransfer(loan.lender, seizeAmount);
+        if (surplusCollateral > 0) {
+            IERC20(loan.collateralToken).safeTransfer(loan.borrower, surplusCollateral);
+        }
 
-        emit DefaultDeclared(loanId, loan.lender);
+        emit DefaultDeclared(loanId, loan.lender, seizeAmount, surplusCollateral);
     }
 
     /**
@@ -692,13 +690,13 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
 
         // Transfer ETH and collateral
-        loan.lender.sendValue(debtRepaid);
+        _safeTransferETHOrQueue(loan.lender, debtRepaid);
         IERC20(loan.collateralToken).safeTransfer(msg.sender, seizeAmount);
         if (surplusCollateral > 0) {
             IERC20(loan.collateralToken).safeTransfer(loan.borrower, surplusCollateral);
         }
         if (excessETH > 0) {
-            payable(msg.sender).sendValue(excessETH);
+            _safeTransferETHOrQueue(msg.sender, excessETH);
         }
 
         emit LoanLiquidated(loanId, msg.sender, seizeAmount, surplusCollateral, debtRepaid);
@@ -927,6 +925,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      */
     function setGracePeriod(uint256 _gracePeriod) external onlyOwner {
         if (_gracePeriod > MAX_GRACE_PERIOD) revert InvalidParameter();
+        _consumeTimelock(msg.sig, abi.encode(_gracePeriod));
         gracePeriod = _gracePeriod;
         emit GracePeriodUpdated(_gracePeriod);
     }
@@ -939,6 +938,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (_threshold <= BASIS_POINTS + liquidationBonus || _threshold > collateralRatio) {
             revert InvalidParameter();
         }
+        _consumeTimelock(msg.sig, abi.encode(_threshold));
         liquidationThreshold = _threshold;
         emit LiquidationThresholdUpdated(_threshold);
     }
@@ -1057,7 +1057,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         offer.state = OfferState.Cancelled;
         lockedETH -= offer.principalAmount;
-        offer.lender.sendValue(offer.principalAmount);
+        _safeTransferETHOrQueue(offer.lender, offer.principalAmount);
         emit LoanOfferCancelled(offerId);
     }
 
@@ -1086,12 +1086,20 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         }
 
         uint256 principal = offer.principalAmount;
-        uint256 annualInterest = Math.mulDiv(principal, interestRate, BASIS_POINTS);
-        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
-        uint256 repaymentAmount = principal + interestAmount;
+        uint256 repaymentAmount;
+        {
+            uint256 annualInterest = Math.mulDiv(principal, interestRate, BASIS_POINTS);
+            uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
+            repaymentAmount = principal + interestAmount;
+        }
+
+        uint256 balanceBefore = IERC20(collateralToken).balanceOf(address(this));
+        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
+        uint256 actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
+        if (actualCollateral == 0) revert InvalidCollateral();
 
         {
-            uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, collateralAmount);
+            uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
             uint256 effectiveRatio = offer.minCollateralRatio > collateralRatio
                 ? offer.minCollateralRatio
                 : collateralRatio;
@@ -1104,8 +1112,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
         }
 
-        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
-        lockedCollateral[collateralToken] += collateralAmount;
+        lockedCollateral[collateralToken] += actualCollateral;
 
         offer.state = OfferState.Accepted;
         lockedETH -= principal;
@@ -1121,7 +1128,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             startTime: block.timestamp,
             state: LoanState.Funded,
             collateralToken: collateralToken,
-            collateralAmount: collateralAmount,
+            collateralAmount: actualCollateral,
             remainingRepaymentAmount: repaymentAmount
         });
 
@@ -1133,8 +1140,8 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         uint256 feeAmount = principal * platformFee / BASIS_POINTS;
         uint256 amountToBorrower = principal - feeAmount;
-        payable(feeRecipient).sendValue(feeAmount);
-        payable(msg.sender).sendValue(amountToBorrower);
+        _safeTransferETHOrQueue(feeRecipient, feeAmount);
+        _safeTransferETHOrQueue(msg.sender, amountToBorrower);
 
         emit LoanOfferAccepted(offerId, loanId, msg.sender);
     }
@@ -1149,7 +1156,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         offer.state = OfferState.Expired;
         lockedETH -= offer.principalAmount;
-        offer.lender.sendValue(offer.principalAmount);
+        _safeTransferETHOrQueue(offer.lender, offer.principalAmount);
         emit LoanOfferExpired(offerId);
     }
 

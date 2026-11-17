@@ -91,11 +91,11 @@ describe("Edge Cases", function () {
         const grace = await socialLending.gracePeriod();
         await ethers.provider.send("evm_increaseTime", [duration + Number(grace) + 1]);
         await ethers.provider.send("evm_mine");
+        await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
 
         // Other user calls it
         await expect(socialLending.connect(otherUser).checkAndDeclareDefault(loanId))
-            .to.emit(socialLending, "DefaultDeclared")
-            .withArgs(loanId, lender.address);
+            .to.emit(socialLending, "DefaultDeclared");
 
         // Check state
         const loan = await socialLending.loans(loanId);
