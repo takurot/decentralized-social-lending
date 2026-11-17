@@ -413,6 +413,118 @@ describe("SocialLendingWithCollateral Security", function () {
                 .to.emit(socialLending, "ETHRescued")
                 .withArgs(extraETH, owner.address);
         });
+
+        it("should queue fee ETH in acceptLoanOffer when feeRecipient reverts and allow withdrawETH", async function () {
+            const receiverAddr = await revertingReceiver.getAddress();
+            await socialLending.connect(owner).setFeeRecipient(receiverAddr);
+
+            const principal = ethers.parseEther("1");
+            await socialLending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, ethers.ZeroAddress, 15000, {
+                value: principal
+            });
+
+            const expectedFee = (principal * 100n) / 10000n;
+            await expect(
+                socialLending.connect(borrower).acceptLoanOffer(
+                    0,
+                    500,
+                    30 * 86400,
+                    await mockToken.getAddress(),
+                    ethers.parseEther("0.002")
+                )
+            )
+                .to.emit(socialLending, "ETHWithdrawalQueued")
+                .withArgs(receiverAddr, expectedFee);
+
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(expectedFee);
+            expect(await socialLending.lockedETH()).to.equal(expectedFee);
+
+            await revertingReceiver.setShouldRevert(false);
+            const withdrawData = socialLending.interface.encodeFunctionData("withdrawETH", []);
+            await revertingReceiver.callContract(await socialLending.getAddress(), withdrawData);
+
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(0);
+            expect(await socialLending.lockedETH()).to.equal(0);
+            expect(await ethers.provider.getBalance(receiverAddr)).to.equal(expectedFee);
+        });
+
+        it("should queue lender ETH in liquidate when lender reverts and allow withdrawETH", async function () {
+            const receiverAddr = await revertingReceiver.getAddress();
+            const principal = ethers.parseEther("1");
+
+            const offerData = socialLending.interface.encodeFunctionData("createLoanOffer", [
+                1000,
+                86400,
+                30 * 86400,
+                ethers.ZeroAddress,
+                15000
+            ]);
+            await revertingReceiver.callContract(await socialLending.getAddress(), offerData, { value: principal });
+
+            await socialLending.connect(borrower).acceptLoanOffer(
+                0,
+                500,
+                30 * 86400,
+                await mockToken.getAddress(),
+                ethers.parseEther("0.001")
+            );
+
+            // Drop collateral price so ratio < liquidationThreshold (120%)
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("1000", 8));
+            const loan = await socialLending.loans(0);
+
+            await expect(
+                socialLending.connect(owner).liquidate(0, { value: loan.remainingRepaymentAmount })
+            )
+                .to.emit(socialLending, "ETHWithdrawalQueued")
+                .withArgs(receiverAddr, loan.remainingRepaymentAmount);
+
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(loan.remainingRepaymentAmount);
+            expect(await socialLending.lockedETH()).to.equal(loan.remainingRepaymentAmount);
+
+            await revertingReceiver.setShouldRevert(false);
+            const withdrawData = socialLending.interface.encodeFunctionData("withdrawETH", []);
+            await revertingReceiver.callContract(await socialLending.getAddress(), withdrawData);
+            expect(await socialLending.lockedETH()).to.equal(0);
+        });
+
+        it("should queue lender refund in expireLoanOffer and cancelLoanOffer when lender reverts", async function () {
+            const receiverAddr = await revertingReceiver.getAddress();
+            const principal = ethers.parseEther("1");
+
+            const offerData = socialLending.interface.encodeFunctionData("createLoanOffer", [
+                1000,
+                86400,
+                30 * 86400,
+                ethers.ZeroAddress,
+                15000
+            ]);
+            // Offer 0: expireLoanOffer
+            await revertingReceiver.callContract(await socialLending.getAddress(), offerData, { value: principal });
+            // Offer 1: cancelLoanOffer
+            await revertingReceiver.callContract(await socialLending.getAddress(), offerData, { value: principal });
+
+            const cancelData = socialLending.interface.encodeFunctionData("cancelLoanOffer", [1]);
+            await expect(revertingReceiver.callContract(await socialLending.getAddress(), cancelData))
+                .to.emit(socialLending, "ETHWithdrawalQueued")
+                .withArgs(receiverAddr, principal);
+
+            await ethers.provider.send("evm_increaseTime", [31 * 86400]);
+            await ethers.provider.send("evm_mine");
+
+            await expect(socialLending.connect(owner).expireLoanOffer(0))
+                .to.emit(socialLending, "ETHWithdrawalQueued")
+                .withArgs(receiverAddr, principal);
+
+            expect(await socialLending.pendingETHWithdrawals(receiverAddr)).to.equal(principal * 2n);
+            expect(await socialLending.lockedETH()).to.equal(principal * 2n);
+
+            await revertingReceiver.setShouldRevert(false);
+            const withdrawData = socialLending.interface.encodeFunctionData("withdrawETH", []);
+            await revertingReceiver.callContract(await socialLending.getAddress(), withdrawData);
+            expect(await socialLending.lockedETH()).to.equal(0);
+            expect(await ethers.provider.getBalance(receiverAddr)).to.equal(principal * 2n);
+        });
     });
 
     describe("Collateral Valuation, Decimals & Oracle Safety (Issue #9)", function () {
