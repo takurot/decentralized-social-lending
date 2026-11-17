@@ -5,7 +5,7 @@ A decentralized peer-to-peer ETH lending protocol on Ethereum backed by ERC-20 c
 ## Features
 
 - **Collateralized P2P ETH Lending**: Borrowers escrow whitelisted ERC-20 collateral and request ETH loans with custom principal, interest rate, and duration.
-- **Chainlink Price Feed Validation**: Real-time collateral valuation with staleness (`PRICE_FEED_TIMEOUT = 1 hour`), round completeness, and positive-price checks.
+- **Chainlink Price Feed Validation**: Real-time collateral valuation with staleness (`PRICE_FEED_TIMEOUT = 1 hour`), round completeness, positive-price checks, `decimals <= 18` bounds, and config-time feed probing (`setPriceFeed`). Asset-specific min/max price-range and deviation circuit-breaker monitoring is an off-chain operational responsibility (paired with governance feed replacement).
 - **Security Controls**: `ReentrancyGuard`, `Pausable`, `Ownable`, per-borrower active loan caps, maximum loan amount limits, locked collateral protection on `rescueTokens`, and Checks-Effects-Interactions throughout.
 - **Gas-Optimized Storage**: Packed `Loan` struct slots, O(1) aggregate counters (`getStats()`), and indexed borrower/lender loan lookups.
 

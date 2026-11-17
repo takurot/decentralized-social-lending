@@ -202,7 +202,9 @@ describe("Timelock Governance (Issue #15)", function () {
 
         it("should revert unqueued setPriceFeed, setCollateralTokenDecimals, setGracePeriod, and setLiquidationThreshold", async function () {
             const tokenAddr = await mockToken.getAddress();
-            const feedAddr = user1.address;
+            const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+            const deployedFeed = await MockPriceFeed.deploy();
+            const feedAddr = await deployedFeed.getAddress();
 
             await expect(lending.setPriceFeed(tokenAddr, feedAddr))
                 .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
@@ -233,7 +235,9 @@ describe("Timelock Governance (Issue #15)", function () {
 
         it("should support timelocked setPriceFeed, setCollateralTokenDecimals, setGracePeriod, and setLiquidationThreshold", async function () {
             const tokenAddr = await mockToken.getAddress();
-            const feedAddr = user1.address;
+            const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+            const deployedFeed = await MockPriceFeed.deploy();
+            const feedAddr = await deployedFeed.getAddress();
 
             const selFeed = lending.interface.getFunction("setPriceFeed").selector;
             const selDec = lending.interface.getFunction("setCollateralTokenDecimals").selector;

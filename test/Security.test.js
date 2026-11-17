@@ -666,6 +666,54 @@ describe("SocialLendingWithCollateral Security", function () {
                 socialLending.getCollateralValueInETH(await mockToken.getAddress(), ethers.parseEther("1"))
             ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
         });
+
+        it("should revert with InvalidPriceData when price feed decimals() > 18", async function () {
+            await mockPriceFeed.setDecimals(19);
+
+            await expect(
+                socialLending.getCollateralValueInETH(await mockToken.getAddress(), ethers.parseEther("1"))
+            ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
+        });
+
+        it("should validate price feed at config time in setPriceFeed", async function () {
+            const tokenAddr = await mockToken.getAddress();
+
+            // EOA address -> InvalidAddress
+            await expect(
+                socialLending.setPriceFeed(tokenAddr, lender.address)
+            ).to.be.revertedWithCustomError(socialLending, "InvalidAddress");
+
+            // Contract without decimals() -> InvalidPriceData (decimals catch)
+            await expect(
+                socialLending.setPriceFeed(tokenAddr, await socialLending.getAddress())
+            ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
+
+            // Contract with decimals() but without latestRoundData() -> InvalidPriceData (latestRoundData catch)
+            await expect(
+                socialLending.setPriceFeed(tokenAddr, tokenAddr)
+            ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
+
+            // Feed with decimals > 18 -> InvalidPriceData
+            const MockPriceFeedFactory = await ethers.getContractFactory("MockPriceFeed");
+            const badFeed = await MockPriceFeedFactory.deploy();
+            await badFeed.setDecimals(19);
+            await expect(
+                socialLending.setPriceFeed(tokenAddr, await badFeed.getAddress())
+            ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
+
+            // Feed returning price <= 0 -> InvalidPriceData
+            await badFeed.setDecimals(8);
+            await badFeed.setLatestPrice(0);
+            await expect(
+                socialLending.setPriceFeed(tokenAddr, await badFeed.getAddress())
+            ).to.be.revertedWithCustomError(socialLending, "InvalidPriceData");
+
+            // Valid probing feed -> succeeds
+            await badFeed.setLatestPrice(ethers.parseUnits("2500", 8));
+            await expect(
+                socialLending.setPriceFeed(tokenAddr, await badFeed.getAddress())
+            ).to.emit(socialLending, "PriceFeedUpdated").withArgs(tokenAddr, await badFeed.getAddress());
+        });
     });
 
     describe("Loan Offer Repayment-Denominator Collateral Check (Issue #31)", function () {

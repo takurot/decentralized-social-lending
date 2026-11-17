@@ -210,6 +210,9 @@ function _consumeTimelock(bytes4 functionSelector, bytes memory params) internal
 > [!NOTE]
 > `pause()` はタイムロック対象外とする（緊急停止の即時性が必要なため）
 
+> [!NOTE]
+> オラクル価格サニティ境界: コントラクト上では `setPriceFeed` 時のコントラクト存在・インターフェースプローブ（`decimals() <= 18`・`latestRoundData()` の正価格確認）と、評価時の鮮度（`PRICE_FEED_TIMEOUT = 1 hour`）・ラウンド整合性・`decimals <= 18` を検証する。トークン別の絶対価格上下限（min/max）や前回比乖離アラートはオフチェーン監視の責務とする。
+
 ---
 
 ### 2.4 借入上限・単独ローン最大額の設定（**Medium / P1**）
