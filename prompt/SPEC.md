@@ -205,7 +205,7 @@ function _consumeTimelock(bytes4 functionSelector, bytes memory params) internal
 }
 ```
 
-**対象関数**: `setPlatformFee`, `setFeeRecipient`, `setLTVRatio`, `setCollateralTokenStatus`
+**対象関数**: `setPlatformFee`, `setFeeRecipient`, `setCollateralRatio`（旧 `setLTVRatio`）, `setCollateralTokenStatus`, `setPriceFeed`, `setCollateralTokenDecimals`, `setGracePeriod`, `setLiquidationThreshold`
 
 > [!NOTE]
 > `pause()` はタイムロック対象外とする（緊急停止の即時性が必要なため）

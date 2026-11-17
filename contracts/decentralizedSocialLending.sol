@@ -376,6 +376,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function setCollateralTokenDecimals(address token, uint8 decimals) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
         if (decimals > 18) revert InvalidParameter();
+        _consumeTimelock(msg.sig, abi.encode(token, decimals));
         collateralTokenDecimals[token] = decimals;
         collateralDecimalsSet[token] = true;
         emit CollateralTokenDecimalsUpdated(token, decimals);
@@ -388,6 +389,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      */
     function setPriceFeed(address token, address priceFeed) external onlyOwner {
         if (token == address(0) || priceFeed == address(0)) revert InvalidAddress();
+        _consumeTimelock(msg.sig, abi.encode(token, priceFeed));
         priceFeeds[token] = priceFeed;
         emit PriceFeedUpdated(token, priceFeed);
     }
@@ -927,6 +929,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      */
     function setGracePeriod(uint256 _gracePeriod) external onlyOwner {
         if (_gracePeriod > MAX_GRACE_PERIOD) revert InvalidParameter();
+        _consumeTimelock(msg.sig, abi.encode(_gracePeriod));
         gracePeriod = _gracePeriod;
         emit GracePeriodUpdated(_gracePeriod);
     }
@@ -939,6 +942,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (_threshold <= BASIS_POINTS + liquidationBonus || _threshold > collateralRatio) {
             revert InvalidParameter();
         }
+        _consumeTimelock(msg.sig, abi.encode(_threshold));
         liquidationThreshold = _threshold;
         emit LiquidationThresholdUpdated(_threshold);
     }
