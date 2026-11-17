@@ -124,11 +124,29 @@ describe("Pause/Unpause Functionality", function () {
             ).to.be.revertedWith("Pausable: paused");
         });
 
-        it("should revert cancelLoanRequest when paused", async function () {
+        it("should allow cancelLoanRequest while paused while keeping requestLoan, fundLoan, and repayLoan blocked", async function () {
+            const tokenAddr = await mockToken.getAddress();
+            const borrowerBefore = await mockToken.balanceOf(borrower.address);
+
             await socialLending.pause();
+
+            await expect(
+                socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, DURATION, tokenAddr, COLLATERAL_AMOUNT)
+            ).to.be.revertedWith("Pausable: paused");
+            await expect(
+                socialLending.connect(lender).fundLoan(0, { value: LOAN_AMOUNT })
+            ).to.be.revertedWith("Pausable: paused");
+            await expect(
+                socialLending.connect(borrower).repayLoan(0, { value: LOAN_AMOUNT })
+            ).to.be.revertedWith("Pausable: paused");
+
             await expect(
                 socialLending.connect(borrower).cancelLoanRequest(0)
-            ).to.be.revertedWith("Pausable: paused");
+            ).to.emit(socialLending, "LoanCancelled")
+                .withArgs(0, borrower.address);
+
+            expect((await mockToken.balanceOf(borrower.address)) - borrowerBefore).to.equal(COLLATERAL_AMOUNT);
+            expect(await socialLending.lockedCollateral(tokenAddr)).to.equal(0n);
         });
 
         it("should allow functions after unpause", async function () {

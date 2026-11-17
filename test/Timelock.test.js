@@ -199,5 +199,89 @@ describe("Timelock Governance (Issue #15)", function () {
                 .withArgs(opHash2);
             expect(await lending.platformFee()).to.equal(300);
         });
+
+        it("should revert unqueued setPriceFeed, setCollateralTokenDecimals, setGracePeriod, and setLiquidationThreshold", async function () {
+            const tokenAddr = await mockToken.getAddress();
+            const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+            const deployedFeed = await MockPriceFeed.deploy();
+            const feedAddr = await deployedFeed.getAddress();
+
+            await expect(lending.setPriceFeed(tokenAddr, feedAddr))
+                .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
+            await expect(lending.setCollateralTokenDecimals(tokenAddr, 6))
+                .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
+            await expect(lending.setGracePeriod(3 * 86400))
+                .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
+            await expect(lending.setLiquidationThreshold(12500))
+                .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
+        });
+
+        it("should validate parameters fail-fast before timelock check on newly timelocked setters", async function () {
+            const tokenAddr = await mockToken.getAddress();
+
+            await expect(lending.setPriceFeed(ethers.ZeroAddress, user1.address))
+                .to.be.revertedWithCustomError(lending, "InvalidAddress");
+            await expect(lending.setPriceFeed(tokenAddr, ethers.ZeroAddress))
+                .to.be.revertedWithCustomError(lending, "InvalidAddress");
+            await expect(lending.setCollateralTokenDecimals(ethers.ZeroAddress, 6))
+                .to.be.revertedWithCustomError(lending, "InvalidAddress");
+            await expect(lending.setCollateralTokenDecimals(tokenAddr, 19))
+                .to.be.revertedWithCustomError(lending, "InvalidParameter");
+            await expect(lending.setGracePeriod(31 * 86400))
+                .to.be.revertedWithCustomError(lending, "InvalidParameter");
+            await expect(lending.setLiquidationThreshold(10500))
+                .to.be.revertedWithCustomError(lending, "InvalidParameter");
+        });
+
+        it("should support timelocked setPriceFeed, setCollateralTokenDecimals, setGracePeriod, and setLiquidationThreshold", async function () {
+            const tokenAddr = await mockToken.getAddress();
+            const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+            const deployedFeed = await MockPriceFeed.deploy();
+            const feedAddr = await deployedFeed.getAddress();
+
+            const selFeed = lending.interface.getFunction("setPriceFeed").selector;
+            const selDec = lending.interface.getFunction("setCollateralTokenDecimals").selector;
+            const selGrace = lending.interface.getFunction("setGracePeriod").selector;
+            const selLiq = lending.interface.getFunction("setLiquidationThreshold").selector;
+
+            await lending.queueChange(selFeed, abiCoder.encode(["address", "address"], [tokenAddr, feedAddr]));
+            await lending.queueChange(selDec, abiCoder.encode(["address", "uint8"], [tokenAddr, 6]));
+            await lending.queueChange(selGrace, abiCoder.encode(["uint256"], [3 * 86400]));
+            await lending.queueChange(selLiq, abiCoder.encode(["uint256"], [12500]));
+
+            await time.increase(TIMELOCK_DELAY + 1);
+
+            await expect(lending.setPriceFeed(tokenAddr, feedAddr))
+                .to.emit(lending, "PriceFeedUpdated")
+                .withArgs(tokenAddr, feedAddr);
+            expect(await lending.priceFeeds(tokenAddr)).to.equal(feedAddr);
+
+            await expect(lending.setCollateralTokenDecimals(tokenAddr, 6))
+                .to.emit(lending, "CollateralTokenDecimalsUpdated")
+                .withArgs(tokenAddr, 6);
+            expect(await lending.collateralTokenDecimals(tokenAddr)).to.equal(6);
+
+            await expect(lending.setGracePeriod(3 * 86400))
+                .to.emit(lending, "GracePeriodUpdated")
+                .withArgs(3 * 86400);
+            expect(await lending.gracePeriod()).to.equal(3 * 86400);
+
+            await expect(lending.setLiquidationThreshold(12500))
+                .to.emit(lending, "LiquidationThresholdUpdated")
+                .withArgs(12500);
+            expect(await lending.liquidationThreshold()).to.equal(12500);
+        });
+
+        it("should keep setMaxLoanAmount and setMaxActiveLoansPerBorrower immediate", async function () {
+            await expect(lending.setMaxLoanAmount(ethers.parseEther("50")))
+                .to.emit(lending, "MaxLoanAmountUpdated")
+                .withArgs(ethers.parseEther("50"));
+            expect(await lending.maxLoanAmount()).to.equal(ethers.parseEther("50"));
+
+            await expect(lending.setMaxActiveLoansPerBorrower(5))
+                .to.emit(lending, "MaxActiveLoansPerBorrowerUpdated")
+                .withArgs(5);
+            expect(await lending.maxActiveLoansPerBorrower()).to.equal(5);
+        });
     });
 });
