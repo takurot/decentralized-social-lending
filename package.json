@@ -11,6 +11,8 @@
     "typecheck": "npx tsc --noEmit",
     "check:build": "node scripts/check-warnings.js",
     "test": "npx hardhat test",
+    "test:e2e": "npx hardhat test test/E2E.test.js",
+    "e2e": "npx hardhat run scripts/e2e-verify.ts",
     "coverage": "npx hardhat coverage",
     "deploy": "npx hardhat run scripts/deploy.ts"
   },
