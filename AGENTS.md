@@ -1,93 +1,68 @@
-# Repository Guidelines
+# 実装ルール
 
-## Project Structure & Module Organization
-- `contracts/` contains Solidity sources.
-- `contracts/decentralizedSocialLending.sol` is the main lending contract.
-- `contracts/interfaces/` and `contracts/mocks/` hold oracle interfaces and test doubles.
-- `test/` contains Hardhat test suites (`BasicTest.js`, `SocialLendingWithCollateral.test.js`).
-- `artifacts/`, `cache/`, `coverage/`, and `typechain-types/` are generated outputs; do not hand-edit them.
-- `hardhat.config.ts` defines compiler, paths, gas reporting, and network defaults.
+Claude Code / Codex は、以下の6ステージで作業する。
+`AGENTS.md` と `CLAUDE.md` は同じ内容を保ち、変更時は両方を更新する。
+通常の実装依頼はPR作成とレビュー・改善まで進める。ユーザーが作業範囲を限定した場合は、その指定を優先する。
 
-## Build, Test, and Development Commands
-- `npm install` installs dependencies.
-- `npx hardhat compile` compiles contracts with Solidity `0.8.24` settings.
-- `npm test` runs the full Hardhat test suite.
-- `npx hardhat test test/BasicTest.js` runs a single test file.
-- `npx hardhat coverage` generates Solidity coverage reports (`coverage/`, `coverage.json`).
-- `REPORT_GAS=1 npx hardhat test` enables gas reporting during tests.
+## 作業の共通ルール
 
-## Coding Style & Naming Conventions
-- Use 4-space indentation in Solidity and JavaScript tests.
-- Follow Solidity conventions: `PascalCase` for contract names, `camelCase` for functions/variables, `UPPER_SNAKE_CASE` for constants.
-- Prefer custom errors and explicit events for state transitions.
-- Add concise NatSpec comments for public/external functions.
-- Keep new files aligned with existing naming patterns (for example, `FeatureName.test.js` in `test/`).
+- `git status` で既存差分を確認し、他の作業を保持する。1タスクにつき1ブランチ・1 worktree を基本とする。
+- 通常の新規作業は、対象リポジトリの最新 `main` を基点にする。remote名だけで対象を判断せず、接続先を確認する。
+- Scheduler管理のworktreeでは、用意されたブランチで作業し、main同期やブランチ切り替えを行わない。
+- 既存の固定ツールチェーン（Node.js / Hardhat / Solidity `0.8.24`）とlockfile（`package-lock.json`）を使い、無関係な依存更新を混ぜない。
+- 生成物（`artifacts/`、`cache/`、`coverage/`、`typechain-types/`、`coverage.json`）は直接編集・コミットしない。
+- 一時的な作業スペースは /Volumes/Storage/private を使うこと。/private はディスクスペースを逼迫させるので使わない。
 
-## Testing Guidelines
-- Framework: Hardhat + Mocha + Chai (`@nomicfoundation/hardhat-toolbox`).
-- Cover both success and failure paths, especially access control, collateral validation, oracle input checks, and repayment/default transitions.
-- For revert checks, use `revertedWithCustomError` when applicable.
-- Contract changes should include test updates in the same pull request.
+## 1. 仕様プランニング
 
-## Security & Configuration Tips
-- Keep privileged paths (`onlyOwner` setters, pause/unpause, rescue functions) explicitly tested when modified.
-- Use mock feeds/tokens in tests (`contracts/mocks/`) instead of live addresses.
-- Store sensitive network values (RPC URLs, private keys) in environment variables; never commit secrets.
-- Enable `REPORT_GAS=1` for changes that may affect borrower/lender transaction costs.
+- Issue・依頼、`README.md`、関連仕様（`prompt/SPEC.md`、`prompt/PLAN.md`）、コントラクト実装（`contracts/`）、テスト（`test/`）を読み、要件と矛盾を確認する。矛盾は推測で解消しない。
+- 変更範囲・対象外・依存関係・設計・受け入れ条件・テスト方針を、既存の仕様文書または作業計画にまとめる。
+- 複雑な計画は planner、設計判断は architect のサブエージェントを活用し、実装を小さな手順に分ける。
 
-## Commit & Pull Request Guidelines
-- Recent history uses concise imperative subjects, often with prefixes like `feat:`, `fix:`, `docs:`, and `build:`; keep that format.
-- Keep commits focused (one logical change per commit).
-- PRs should include a short behavior summary, linked issue(s) when available, executed test commands/results, compatibility/security impact notes for contract logic changes, and any unverified items.
+## 2. サブエージェントによる仕様レビュー
 
-## Development Workflow (6-Stage Implementation Process)
-Agents and contributors follow this 6-stage workflow for implementation tasks. Standard implementation requests proceed through PR creation and the review/improvement loop unless the user explicitly limits the scope.
+- 仕様の作成者とは別のサブエージェントに、要件の漏れ・設計の妥当性・スマートコントラクトの安全性（リエントランシー、アクセス制御、オラクル検証、担保・ETH会計整合性、EIP-170バイトコードサイズ上限）・テスト可能性をレビューさせる。
+- 妥当な指摘を仕様へ反映し、再レビューする。不採用の指摘には根拠を残す。
+- 妥当な未解決指摘がなくなってから、TDD実装へ進む。
 
-### Common Workspace Rules
-- Check `git status` before starting to preserve any existing uncommitted work. Use one branch (and one worktree when parallelizing) per task.
-- Base new work on the latest `main` of the target repository/fork; verify the remote URL rather than assuming by remote name alone.
-- In scheduler-managed or pre-provisioned worktrees, work on the assigned branch without switching branches or syncing `main`.
-- Use the existing pinned toolchain and lockfile (`package-lock.json`); do not mix unrelated dependency updates into feature or fix PRs.
+## 3. TDD実装（Red → Green → Refactor）
 
-### 1. Specification & Planning
-- Read the issue/request, `README.md`, relevant specifications (`prompt/SPEC.md`, `prompt/PLAN.md`), existing implementations, and tests to identify requirements and contradictions. Never resolve contradictions by guessing.
-- Summarize scope, non-goals, dependencies, design decisions, acceptance criteria, and test strategy in a specification or implementation plan before coding.
-- For complex plans or architectural decisions, leverage planning/architecture subagents and break implementation into small, verifiable steps.
+- tdd-guide と進め、受け入れ条件を示すテストを先に書き、意図した理由で失敗することを確認する（Red）。
+- テストを通す最小限の実装を行う（Green）。責務・重複・命名・NatSpecコメントを整理し、再度テストを通す（Refactor）。
+- Hardhat + Mocha + Chai（`test/*.test.js`）で正常系と重要な異常系（アクセス制御、担保・オラクル入力検証、返済・デフォルト・清算・Pause遷移）を検証し、外部依存（ERC-20、Chainlink Price Feed、ETH受取拒否コントラクト等）は `contracts/mocks/` のモックやfixtureで隔離する。revert検証には原則 `revertedWithCustomError` を使う。
+- 入力は境界で検証し、状態遷移にはカスタムエラーと明示的なイベントを用いる。秘密情報（RPC URL、秘密鍵、APIキー等）をコード・ログ・fixtureへ残さない。
+- 外部コントラクト呼び出し（ERC-20転送・ETH送金・オラクル参照）と内部ストレージ状態（`lockedCollateral`、`lockedETH`、ローン状態・統計カウンタ）を区別する。Checks-Effects-Interactions（CEI）を徹底し、状態変更前に検証を行い、変更後はイベントと状態読み出し（readback）で結果を確認する。
+- 部分成功・状態更新後の不確実な状態・検証不能を成功扱いせず、Pull-Paymentフォールバックや診断可能なカスタムエラーで復旧可能性を保つ。
+- 挙動変更と同時に関連文書（`README.md`、`prompt/SPEC.md` 等）を更新する。文書のみの変更では実行時テストを増やさず、内容・リンク・差分を確認する。
 
-### 2. Subagent Specification Review
-- Have an independent subagent (different from the specification author) review the plan for missing requirements, design soundness, security risks, and testability.
-- Incorporate valid feedback into the specification and re-review; document explicit rationale for any rejected feedback.
-- Proceed to TDD implementation only after all valid findings are resolved.
+## 4. 検証・品質ゲート
 
-### 3. TDD Implementation (Red → Green → Refactor)
-- Write tests expressing the acceptance criteria first and verify they fail for the expected reason (**Red**).
-- Write the minimal implementation needed to pass the tests (**Green**), then clean up responsibilities, duplication, and naming while keeping tests passing (**Refactor**).
-- Verify both success paths and critical failure/revert paths at the appropriate test layers, isolating external dependencies with mocks/fixtures (e.g., `contracts/mocks/`).
-- Validate inputs at boundaries and build state updates cleanly; never leave secrets in code, logs, or fixtures.
-- Distinguish live/external state from stored/mocked state, validate before state-changing operations, and verify post-state (checks-effects-interactions and readback verification).
-- Never treat partial success, uncertain post-write state, or unverifiable outcomes as success; preserve diagnostic context for recovery.
-- Update relevant documentation alongside behavioral changes. For docs-only changes, verify content, links, and diffs without adding unnecessary runtime tests.
+- まず対象テスト（`npx hardhat test test/<Target>.test.js`）を実行し、コード変更のPR前には以下の品質ゲートと変更領域に対応するCIチェックを実行する。
 
-### 4. Verification & Quality Gates
-- Run targeted tests first, then execute the repository's full quality gates and CI checks before opening a PR:
-  - `npx hardhat compile`
-  - `npm test` (or `npx hardhat test`)
-  - `npx hardhat coverage` (verify against project/CI coverage thresholds and record measured results; never report unmeasured coverage as passing)
-  - `REPORT_GAS=1 npx hardhat test` when changes may affect gas costs
-- If dependencies change, inspect lockfile diffs and check for vulnerabilities.
-- Fix failures and re-verify. If any check cannot run due to environment constraints, record the reason and unverified scope explicitly—never report skipped or environment-blocked checks as `PASS`.
+```sh
+npx hardhat compile
+npm test
+npx hardhat coverage
+REPORT_GAS=1 npx hardhat test
+```
 
-### 5. Commit, Push, and PR Creation
-- Run `git diff --check` and review the full diff to ensure no secrets or unrelated changes are included.
-- Stage only the intended files and commit using the `<type>: <description>` convention.
-- Verify the target remote, working branch, and outgoing diff before pushing. Never force-push or push directly to `main`.
-- Create a PR only after required verifications pass (mark as Draft if environment-dependent checks remain unverified, and do not treat it as complete).
-- Include in the PR description: linked issue(s), summary of changes and rationale, acceptance criteria status, verification results, compatibility/security impact, and any unverified items.
+- カバレッジはCI基準（Statements 95%以上、Branches 90%以上、Functions 100%）を維持する。計測結果を記録し、未計測を達成済みと表現しない。
+- コントラクト変更ではEIP-170デプロイサイズ上限（24,576 bytes）およびガスコストへの影響を確認する。依存変更では `package-lock.json` の差分と脆弱性を確認し、デプロイスクリプト（`scripts/deploy.ts`）や設定変更時は該当動作を検証する。
+- 失敗は修正して再検証する。実行できない検証は理由と未確認範囲を記録し、skipや環境制約による失敗をPASSと報告しない。
 
-### 6. Subagent PR Review & Improvement Loop
-- Have an independent code-reviewer subagent review the latest PR head diff against the specification, acceptance criteria, and verification results (and include a security review for security-sensitive or contract logic changes).
-- Subagent reviews supplement—and do not replace—GitHub approvals or required CI checks.
-- Verify each finding against the spec, reproduction steps, and tests; fix valid issues and record rationale for rejected findings.
-- Repeat **fix → re-run tests & quality gates → commit & push → re-review latest head** until no valid unresolved findings remain (returning to Stages 1–2 if the specification itself must change).
-- Once no valid unresolved findings remain and quality gates/CI pass on the latest head, report the PR and verification results as ready for review.
-- Merging, releasing, and deploying are outside this flow and are performed only when explicitly requested.
+## 5. コミット・push・PR作成
+
+- `git diff --check` と差分レビューを行い、秘密情報や無関係な変更がないことを確認する。
+- 対象ファイルだけをstageし、`<type>: <description>` 形式でコミットする。
+- 接続先・作業ブランチ・送信する差分を確認してpushする。mainへの直接pushやforce pushは行わない。
+- 必要な検証が成功してからPRを作成する。環境依存の未検証事項が残る場合はdraftとし、完了扱いしない。
+- PRには対応Issue、変更内容と理由、受け入れ条件の充足、検証結果、互換性・安全性・ガスコストへの影響、未検証事項を記載する。
+
+## 6. サブエージェントによるPRレビュー・改善ループ
+
+- 実装者とは別の code-reviewer サブエージェントに、最新PR headの差分・仕様・受け入れ条件・検証結果をレビューさせる。
+- コントラクトロジックやセキュリティに関わる変更は security-reviewer にも依頼する。サブエージェントのレビューはGitHub上の承認や必須CIの代わりにしない。
+- 指摘を仕様・再現手順・テストで確かめ、妥当な指摘を修正する。不採用の指摘には根拠を残す。
+- 修正 → 必要なテスト・品質ゲートの再実行 → コミット・push → 最新headの再レビューを繰り返す。仕様が変わる場合はステージ1・2へ戻る。
+- 妥当な未解決指摘がなく、最新headで必要な品質ゲートと必須CIが成功したら、レビュー待ちの成果としてPRと検証結果を報告する。
+- merge・release・deployはこのフローに含めず、別途明示された場合だけ行う。PR作成とmerge完了を区別する。
