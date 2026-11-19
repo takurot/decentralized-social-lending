@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { wrapWithTimelock } = require("./helpers/timelock");
 
 describe("Loan Offers (PR-08)", function () {
     let socialLending;
@@ -21,7 +22,7 @@ describe("Loan Offers (PR-08)", function () {
         await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8)); // 1 token = 1 ETH
 
         const SocialLending = await ethers.getContractFactory("SocialLendingWithCollateral");
-        socialLending = await SocialLending.deploy(feeRecipient.address);
+        socialLending = wrapWithTimelock(await SocialLending.deploy(feeRecipient.address), [mockPriceFeed]);
 
         await socialLending.setCollateralTokenStatus(await mockToken.getAddress(), true);
         await socialLending.setCollateralTokenDecimals(await mockToken.getAddress(), 18);

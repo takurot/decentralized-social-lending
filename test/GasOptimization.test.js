@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { wrapWithTimelock } = require("./helpers/timelock");
 
 describe("Gas Optimization & Struct Packing (PR-04)", function () {
     let socialLending;
@@ -29,8 +30,9 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
 
         // Deploy Social Lending
         const SocialLending = await ethers.getContractFactory("SocialLendingWithCollateral");
-        socialLending = await SocialLending.deploy(owner.address);
-        await socialLending.waitForDeployment();
+        const deployed = await SocialLending.deploy(owner.address);
+        await deployed.waitForDeployment();
+        socialLending = wrapWithTimelock(deployed, [mockPriceFeed]);
 
         // Setup
         await socialLending.setCollateralTokenStatus(await mockToken.getAddress(), true);
@@ -82,25 +84,26 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
 
     describe("View Functions & Indexing", function () {
         beforeEach(async function () {
-            // Create 3 loans
+            const shortDuration = 7 * 86400; // 7 days so Loan 0 remains within 30-day request expiry after Loan 3 defaults
+            // Create 5 loans
             // Loan 0: Requested
-            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, DURATION, await mockToken.getAddress(), COLLATERAL_AMOUNT);
+            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, shortDuration, await mockToken.getAddress(), COLLATERAL_AMOUNT);
 
             // Loan 1: Funded
-            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, DURATION, await mockToken.getAddress(), COLLATERAL_AMOUNT);
+            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, shortDuration, await mockToken.getAddress(), COLLATERAL_AMOUNT);
             await socialLending.connect(lender).fundLoan(1, { value: LOAN_AMOUNT });
 
             // Loan 2: Repaid
-            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, DURATION, await mockToken.getAddress(), COLLATERAL_AMOUNT);
+            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, shortDuration, await mockToken.getAddress(), COLLATERAL_AMOUNT);
             await socialLending.connect(lender).fundLoan(2, { value: LOAN_AMOUNT });
             const loan2 = await socialLending.loans(2);
             await socialLending.connect(borrower).repayLoan(2, { value: loan2.repaymentAmount });
 
             // Loan 3: Defaulted (Manually Declared)
-            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, DURATION, await mockToken.getAddress(), COLLATERAL_AMOUNT);
+            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, shortDuration, await mockToken.getAddress(), COLLATERAL_AMOUNT);
             await socialLending.connect(lender).fundLoan(3, { value: LOAN_AMOUNT });
-            // Forward time past duration + 3-day grace period
-            await ethers.provider.send("evm_increaseTime", [DURATION + 3 * 86400 + 1]);
+            // Forward time past shortDuration + 3-day grace period
+            await ethers.provider.send("evm_increaseTime", [shortDuration + 3 * 86400 + 1]);
             await ethers.provider.send("evm_mine");
             await mockPriceFeed.setLatestPrice(ethers.parseUnits("1", 8));
             await socialLending.connect(lender).declareDefault(3);
@@ -116,7 +119,7 @@ describe("Gas Optimization & Struct Packing (PR-04)", function () {
             );
 
             // Loan 4: Cancelled
-            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, DURATION, await mockToken.getAddress(), COLLATERAL_AMOUNT);
+            await socialLending.connect(borrower).requestLoan(LOAN_AMOUNT, INTEREST_RATE, shortDuration, await mockToken.getAddress(), COLLATERAL_AMOUNT);
             await socialLending.connect(borrower).cancelLoanRequest(4);
         });
 

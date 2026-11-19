@@ -4,11 +4,9 @@ pragma solidity 0.8.24;
 // Import OpenZeppelin libraries
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
-import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Import Chainlink oracle interface
@@ -39,6 +37,8 @@ error InsufficientUnlockedCollateral();
 error ChangeNotQueued();
 error TimelockNotElapsed();
 error ChangeAlreadyExecuted();
+error ChangeExpired();
+error ChangeAlreadyQueued();
 error InvalidOfferId();
 error OfferExpired();
 error OfferNotExpired();
@@ -52,12 +52,9 @@ error LoanRequestExpired();
 /**
  * @title SocialLendingWithCollateral
  * @notice Decentralized peer-to-peer ETH lending protocol backed by ERC-20 collateral and Chainlink price feeds.
- * @dev Uses ReentrancyGuard, Ownable, Pausable, and Checks-Effects-Interactions for state transitions.
+ * @dev Uses ReentrancyGuard, Ownable2Step, Pausable, and Checks-Effects-Interactions for state transitions.
  */
-contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
-    using SafeERC20 for IERC20;
-    using Address for address payable;
-
+contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable {
     // Constants
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant MAX_INTEREST_RATE = 2000; // 20%
@@ -141,7 +138,8 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     // Timelock governance settings
     uint256 public constant TIMELOCK_DELAY = 48 hours;
-    bool public timelockEnabled;
+    uint256 public constant TIMELOCK_GRACE_PERIOD = 14 days;
+    bool public timelockEnabled = true;
 
     struct PendingChange {
         bytes4 functionSelector;
@@ -265,7 +263,13 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     constructor(address _feeRecipient) {
         if (_feeRecipient == address(0)) revert InvalidAddress();
         feeRecipient = _feeRecipient;
-        _transferOwnership(msg.sender);
+    }
+
+    /**
+     * @notice Disabled to prevent permanently bricking governance, pause, and oracle updates
+     */
+    function renounceOwnership() public view override onlyOwner {
+        revert InvalidParameter();
     }
 
     // ... (existing code for setCollateralRatio etc)
@@ -350,6 +354,19 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (offerId >= offerCount) revert InvalidOfferId();
     }
 
+    function _checkNonZeroAddress(address addr) internal pure {
+        if (addr == address(0)) revert InvalidAddress();
+    }
+
+    function _safeTransferToken(address token, address to, uint256 amount) internal {
+        _callERC20(token, abi.encodeWithSelector(IERC20.transfer.selector, to, amount));
+    }
+
+    function _callERC20(address token, bytes memory data) internal {
+        (bool ok, bytes memory ret) = token.call(data);
+        if (!ok || (ret.length > 0 && !abi.decode(ret, (bool)))) revert InvalidCollateral();
+    }
+
     /**
      * @notice Pauses the contract, disabling non-owner functions
      */
@@ -370,7 +387,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param allowed Whether the token is allowed as collateral
      */
     function setCollateralTokenStatus(address token, bool allowed) external onlyOwner {
-        if (token == address(0)) revert InvalidAddress();
+        _checkNonZeroAddress(token);
         _consumeTimelock(msg.sig, abi.encode(token, allowed));
         allowedCollateralTokens[token] = allowed;
         if (allowed && !collateralDecimalsSet[token] && token.code.length > 0) {
@@ -395,7 +412,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param decimals The number of decimal places for the token
      */
     function setCollateralTokenDecimals(address token, uint8 decimals) external onlyOwner {
-        if (token == address(0)) revert InvalidAddress();
+        _checkNonZeroAddress(token);
         if (decimals > 18) revert InvalidParameter();
         if (lockedCollateral[token] > 0) revert CollateralLocked();
         _consumeTimelock(msg.sig, abi.encode(token, decimals));
@@ -420,7 +437,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param timeout The staleness timeout in seconds (between MIN_PRICE_FEED_TIMEOUT and MAX_PRICE_FEED_TIMEOUT)
      */
     function setPriceFeedTimeout(address token, uint256 timeout) external onlyOwner {
-        if (token == address(0)) revert InvalidAddress();
+        _checkNonZeroAddress(token);
         if (timeout < MIN_PRICE_FEED_TIMEOUT || timeout > MAX_PRICE_FEED_TIMEOUT) revert InvalidParameter();
         _consumeTimelock(msg.sig, abi.encode(token, timeout));
         priceFeedTimeouts[token] = timeout;
@@ -492,7 +509,21 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function cancelLoanRequest(uint256 loanId) external nonReentrant validLoanId(loanId) onlyBorrower(loanId) {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Requested) revert InvalidLoanState();
+        _cancelRequest(loan, loanId);
+    }
 
+    /**
+     * @notice Allows anyone to expire an unfunded loan request once its expiration timestamp has passed
+     * @param loanId The ID of the expired loan request
+     */
+    function expireLoanRequest(uint256 loanId) external nonReentrant validLoanId(loanId) {
+        Loan storage loan = loans[loanId];
+        if (loan.state != LoanState.Requested) revert InvalidLoanState();
+        if (block.timestamp <= loan.expiresAt) revert LoanNotExpired();
+        _cancelRequest(loan, loanId);
+    }
+
+    function _cancelRequest(Loan storage loan, uint256 loanId) internal {
         // Update state before external calls (Checks-Effects-Interactions)
         loan.state = LoanState.Cancelled;
         borrowerActiveLoans[loan.borrower]--;
@@ -500,7 +531,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         // Return collateral
         lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
-        IERC20(loan.collateralToken).safeTransfer(loan.borrower, loan.collateralAmount);
+        _safeTransferToken(loan.collateralToken, loan.borrower, loan.collateralAmount);
 
         emit LoanCancelled(loanId, loan.borrower);
     }
@@ -568,7 +599,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             _touchReputation(loan.borrower, rep);
 
             // Return collateral
-            IERC20(loan.collateralToken).safeTransfer(loan.borrower, loan.collateralAmount);
+            _safeTransferToken(loan.collateralToken, loan.borrower, loan.collateralAmount);
 
             emit LoanRepaid(loanId, loan.borrower, loan.lender, amount);
         } else {
@@ -602,7 +633,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param recipient The payable recipient address to receive the queued ETH
      */
     function withdrawETHTo(address payable recipient) external nonReentrant {
-        if (recipient == address(0)) revert InvalidAddress();
+        _checkNonZeroAddress(recipient);
         _withdrawETHTo(recipient);
     }
 
@@ -611,8 +642,13 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (amount == 0) revert InvalidAmount();
         pendingETHWithdrawals[msg.sender] = 0;
         lockedETH -= amount;
-        recipient.sendValue(amount);
+        _requireETHTransfer(recipient, amount);
         emit ETHWithdrawn(recipient, amount);
+    }
+
+    function _requireETHTransfer(address to, uint256 amount) internal {
+        (bool ok, ) = payable(to).call{value: amount}("");
+        if (!ok) revert InvalidParameter();
     }
 
     /**
@@ -681,12 +717,22 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         rep.defaultedLoans++;
         _touchReputation(loan.borrower, rep);
 
-        IERC20(loan.collateralToken).safeTransfer(loan.lender, seizeAmount);
-        if (surplusCollateral > 0) {
-            IERC20(loan.collateralToken).safeTransfer(loan.borrower, surplusCollateral);
-        }
+        _settleCollateralAndBonus(loan.collateralToken, loan.lender, loan.borrower, seizeAmount, surplusCollateral);
 
         emit DefaultDeclared(loanId, loan.lender, seizeAmount, surplusCollateral);
+    }
+
+    function _settleCollateralAndBonus(
+        address token,
+        address recipient,
+        address borrower,
+        uint256 seizeAmount,
+        uint256 surplusCollateral
+    ) internal {
+        _safeTransferToken(token, recipient, seizeAmount);
+        if (surplusCollateral > 0) {
+            _safeTransferToken(token, borrower, surplusCollateral);
+        }
     }
 
     /**
@@ -718,10 +764,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
         // Transfer ETH and collateral
         _safeTransferETHOrQueue(loan.lender, debtRepaid);
-        IERC20(loan.collateralToken).safeTransfer(msg.sender, seizeAmount);
-        if (surplusCollateral > 0) {
-            IERC20(loan.collateralToken).safeTransfer(loan.borrower, surplusCollateral);
-        }
+        _settleCollateralAndBonus(loan.collateralToken, msg.sender, loan.borrower, seizeAmount, surplusCollateral);
         if (excessETH > 0) {
             _safeTransferETHOrQueue(msg.sender, excessETH);
         }
@@ -804,7 +847,23 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @return Array of loan IDs
      */
     function getBorrowerLoans(address borrower) external view returns (uint256[] memory) {
-        return _filterLoansByState(_borrowerLoanIds[borrower], true);
+        return _filterLoansByState(_borrowerLoanIds[borrower], borrowerActiveLoans[borrower], true);
+    }
+
+    /**
+     * @notice Gets a paginated slice of all loan IDs for a borrower
+     * @param borrower The address of the borrower
+     * @param offset Starting index in the borrower's loan history
+     * @param limit Maximum number of loan IDs to return
+     * @return loanIds Paginated slice of loan IDs
+     * @return total Total number of loans recorded for the borrower
+     */
+    function getBorrowerLoansPaginated(
+        address borrower,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (uint256[] memory loanIds, uint256 total) {
+        return _paginateStorageArray(_borrowerLoanIds[borrower], offset, limit);
     }
 
     /**
@@ -826,41 +885,110 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @return Array of loan IDs
      */
     function getLenderLoans(address lender) external view returns (uint256[] memory) {
-        return _filterLoansByState(_lenderLoanIds[lender], false);
+        return _filterLoansByState(_lenderLoanIds[lender], lenderActiveLoans[lender], false);
+    }
+
+    /**
+     * @notice Gets a paginated slice of all loan IDs for a lender
+     * @param lender The address of the lender
+     * @param offset Starting index in the lender's loan history
+     * @param limit Maximum number of loan IDs to return
+     * @return loanIds Paginated slice of loan IDs
+     * @return total Total number of loans recorded for the lender
+     */
+    function getLenderLoansPaginated(
+        address lender,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (uint256[] memory loanIds, uint256 total) {
+        return _paginateStorageArray(_lenderLoanIds[lender], offset, limit);
+    }
+
+    /**
+     * @notice Gets a paginated slice of loan offer IDs
+     * @param offset Starting offer ID
+     * @param limit Maximum number of offer IDs to return
+     * @return offerIds Paginated slice of sequential offer IDs
+     * @return total Total number of offers created
+     */
+    function getLoanOffersPaginated(
+        uint256 offset,
+        uint256 limit
+    ) external view returns (uint256[] memory offerIds, uint256 total) {
+        uint256 count;
+        (offerIds, total, count) = _initPage(offerCount, offset, limit);
+        for (uint256 i = 0; i < count; i++) {
+            offerIds[i] = offset + i;
+        }
+    }
+
+    function _paginateStorageArray(
+        uint256[] storage arr,
+        uint256 offset,
+        uint256 limit
+    ) internal view returns (uint256[] memory page, uint256 total) {
+        uint256 count;
+        (page, total, count) = _initPage(arr.length, offset, limit);
+        for (uint256 i = 0; i < count; i++) {
+            page[i] = arr[offset + i];
+        }
+    }
+
+    function _initPage(
+        uint256 totalLen,
+        uint256 offset,
+        uint256 limit
+    ) internal pure returns (uint256[] memory page, uint256 total, uint256 count) {
+        total = totalLen;
+        if (offset < total && limit > 0) {
+            count = total - offset;
+            if (count > limit) count = limit;
+            page = new uint256[](count);
+        }
     }
 
     function _filterLoansByState(
         uint256[] storage allLoanIds,
+        uint256 maxActive,
         bool includeRequested
-    ) internal view returns (uint256[] memory) {
-        uint256 activeCount = 0;
-        for (uint256 i = 0; i < allLoanIds.length; i++) {
-            LoanState state = loans[allLoanIds[i]].state;
-            if (state == LoanState.Funded || (includeRequested && state == LoanState.Requested)) {
-                activeCount++;
-            }
-        }
-
-        uint256[] memory activeLoanIds = new uint256[](activeCount);
+    ) internal view returns (uint256[] memory activeLoanIds) {
+        activeLoanIds = new uint256[](maxActive);
         uint256 counter = 0;
-        for (uint256 i = 0; i < allLoanIds.length; i++) {
-            LoanState state = loans[allLoanIds[i]].state;
-            if (state == LoanState.Funded || (includeRequested && state == LoanState.Requested)) {
-                activeLoanIds[counter] = allLoanIds[i];
-                counter++;
+        uint256 len = allLoanIds.length;
+        for (uint256 i = 0; i < len && counter < maxActive; i++) {
+            uint256 loanId = allLoanIds[i];
+            Loan storage loan = loans[loanId];
+            LoanState state = loan.state;
+            if (
+                state == LoanState.Funded ||
+                (includeRequested && state == LoanState.Requested && block.timestamp <= loan.expiresAt)
+            ) {
+                activeLoanIds[counter++] = loanId;
             }
         }
-
-        return activeLoanIds;
+        assembly {
+            mstore(activeLoanIds, counter)
+        }
     }
 
     /**
-     * @notice Permanently enables the 48-hour timelock for sensitive admin setters.
+     * @notice Permanently enables the 48-hour timelock for sensitive admin setters (enabled by default from deployment).
      */
-    function enableTimelock() external onlyOwner {
-        if (timelockEnabled) revert InvalidParameter();
-        timelockEnabled = true;
-        emit TimelockEnabled();
+    function enableTimelock() external view onlyOwner {
+        revert InvalidParameter();
+    }
+
+    function _isTimelockedSelector(bytes4 selector) internal pure returns (bool) {
+        return
+            selector == this.setCollateralTokenStatus.selector ||
+            selector == this.setCollateralTokenDecimals.selector ||
+            selector == this.setPriceFeed.selector ||
+            selector == this.setPriceFeedTimeout.selector ||
+            selector == this.setPlatformFee.selector ||
+            selector == this.setFeeRecipient.selector ||
+            selector == this.setCollateralRatio.selector ||
+            selector == this.setGracePeriod.selector ||
+            selector == this.setLiquidationThreshold.selector;
     }
 
     /**
@@ -870,17 +998,21 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         bytes4 functionSelector,
         bytes calldata params
     ) external onlyOwner returns (bytes32 operationHash) {
-        if (functionSelector == bytes4(0)) revert InvalidParameter();
-        uint256 executeAfter = block.timestamp + TIMELOCK_DELAY;
+        if (!_isTimelockedSelector(functionSelector)) revert InvalidParameter();
         bytes32 callKey = keccak256(abi.encode(functionSelector, params));
+        bytes32 existingHash = _queuedOperationByCall[callKey];
+        if (existingHash != bytes32(0)) {
+            if (block.timestamp <= pendingChanges[existingHash].executeAfter + TIMELOCK_GRACE_PERIOD) {
+                revert ChangeAlreadyQueued();
+            }
+            delete pendingChanges[existingHash];
+        }
+        uint256 executeAfter = block.timestamp + TIMELOCK_DELAY;
         operationHash = keccak256(abi.encode(functionSelector, params, executeAfter));
-        pendingChanges[operationHash] = PendingChange({
-            functionSelector: functionSelector,
-            params: params,
-            callKey: callKey,
-            executeAfter: executeAfter,
-            executed: false
-        });
+        pendingChanges[operationHash].functionSelector = functionSelector;
+        pendingChanges[operationHash].params = params;
+        pendingChanges[operationHash].callKey = callKey;
+        pendingChanges[operationHash].executeAfter = executeAfter;
         _queuedOperationByCall[callKey] = operationHash;
         emit ChangeQueued(operationHash, functionSelector, params, executeAfter);
     }
@@ -893,26 +1025,22 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (change.executeAfter == 0) revert ChangeNotQueued();
         if (change.executed) revert ChangeAlreadyExecuted();
 
-        bytes32 callKey = change.callKey;
-        if (_queuedOperationByCall[callKey] == operationHash) {
-            delete _queuedOperationByCall[callKey];
-        }
+        delete _queuedOperationByCall[change.callKey];
         delete pendingChanges[operationHash];
         emit ChangeCancelled(operationHash);
     }
 
     /**
-     * @dev Verifies and consumes a queued timelock operation when timelock is enabled.
+     * @dev Verifies and consumes a queued timelock operation.
      */
     function _consumeTimelock(bytes4 functionSelector, bytes memory params) internal {
-        if (!timelockEnabled) return;
-
         bytes32 callKey = keccak256(abi.encode(functionSelector, params));
         bytes32 operationHash = _queuedOperationByCall[callKey];
         PendingChange storage change = pendingChanges[operationHash];
 
         if (change.executeAfter == 0) revert ChangeNotQueued();
         if (block.timestamp < change.executeAfter) revert TimelockNotElapsed();
+        if (block.timestamp > change.executeAfter + TIMELOCK_GRACE_PERIOD) revert ChangeExpired();
 
         change.executed = true;
         delete _queuedOperationByCall[callKey];
@@ -935,7 +1063,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param _feeRecipient The new non-zero fee recipient address.
      */
     function setFeeRecipient(address _feeRecipient) external onlyOwner {
-        if (_feeRecipient == address(0)) revert InvalidAddress();
+        _checkNonZeroAddress(_feeRecipient);
         _consumeTimelock(msg.sig, abi.encode(_feeRecipient));
         feeRecipient = _feeRecipient;
         emit FeeRecipientUpdated(_feeRecipient);
@@ -1037,13 +1165,14 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param to The recipient address.
      */
     function rescueTokens(address token, uint256 amount, address to) external onlyOwner {
-        if (token == address(0) || to == address(0)) revert InvalidAddress();
+        _checkNonZeroAddress(token);
+        _checkNonZeroAddress(to);
         uint256 contractBalance = IERC20(token).balanceOf(address(this));
         uint256 locked = lockedCollateral[token];
         if (contractBalance < locked || amount > contractBalance - locked) {
             revert InsufficientUnlockedCollateral();
         }
-        IERC20(token).safeTransfer(to, amount);
+        _safeTransferToken(token, to, amount);
         emit TokensRescued(token, amount, to);
     }
 
@@ -1159,7 +1288,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     function _validateCollateralInput(address collateralToken, uint256 collateralAmount) internal view {
         if (collateralAmount == 0) revert InvalidCollateral();
-        if (collateralToken == address(0)) revert InvalidAddress();
+        _checkNonZeroAddress(collateralToken);
         if (!allowedCollateralTokens[collateralToken]) revert TokenNotAllowed();
     }
 
@@ -1238,7 +1367,10 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 requiredRatio
     ) internal returns (uint256 actualCollateral) {
         uint256 balanceBefore = IERC20(collateralToken).balanceOf(address(this));
-        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
+        _callERC20(
+            collateralToken,
+            abi.encodeWithSelector(IERC20.transferFrom.selector, msg.sender, address(this), collateralAmount)
+        );
         actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
         if (actualCollateral == 0) revert InvalidCollateral();
 
@@ -1292,11 +1424,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param to The recipient address.
      */
     function rescueETH(uint256 amount, address to) external onlyOwner nonReentrant {
-        if (to == address(0)) revert InvalidAddress();
+        _checkNonZeroAddress(to);
         if (address(this).balance < lockedETH || amount > address(this).balance - lockedETH) {
             revert InsufficientUnlockedETH();
         }
-        payable(to).sendValue(amount);
+        _requireETHTransfer(to, amount);
         emit ETHRescued(amount, to);
     }
 }

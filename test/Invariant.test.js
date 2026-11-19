@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { wrapWithTimelock } = require("./helpers/timelock");
 
 describe("Stateful Protocol Accounting Invariants (Issue #57)", function () {
     // Deterministic xorshift32 PRNG for reproducible multi-actor state-machine fuzzing
@@ -32,11 +33,15 @@ describe("Stateful Protocol Accounting Invariants (Issue #57)", function () {
             expectedLockedCollateral.set(await t.getAddress(), 0n);
         }
 
+        const latestBlock = await ethers.provider.getBlock("latest");
+        const nowTs = BigInt(latestBlock.timestamp);
         const countsByState = [0, 0, 0, 0, 0, 0]; // Requested, Funded, Repaid, Defaulted, Cancelled, Liquidated
         const expectedBorrowerActive = new Map();
+        const expectedBorrowerViewActive = new Map();
         const expectedLenderActive = new Map();
         for (const addr of trackedAddresses) {
             expectedBorrowerActive.set(addr, 0n);
+            expectedBorrowerViewActive.set(addr, 0n);
             expectedLenderActive.set(addr, 0n);
         }
 
@@ -54,6 +59,12 @@ describe("Stateful Protocol Accounting Invariants (Issue #57)", function () {
                     loan.borrower,
                     (expectedBorrowerActive.get(loan.borrower) || 0n) + 1n
                 );
+                if (state === 1 || nowTs <= loan.expiresAt) {
+                    expectedBorrowerViewActive.set(
+                        loan.borrower,
+                        (expectedBorrowerViewActive.get(loan.borrower) || 0n) + 1n
+                    );
+                }
             }
             if (state === 1) {
                 // Funded (1) counts toward lenderActiveLoans and must have remainingRepaymentAmount > 0
@@ -122,7 +133,7 @@ describe("Stateful Protocol Accounting Invariants (Issue #57)", function () {
             expect(await lending.lenderActiveLoans(addr)).to.equal(expectedLenderActive.get(addr));
 
             const borrowerLoanIds = await lending.getBorrowerLoans(addr);
-            expect(BigInt(borrowerLoanIds.length)).to.equal(expectedBorrowerActive.get(addr));
+            expect(BigInt(borrowerLoanIds.length)).to.equal(expectedBorrowerViewActive.get(addr));
 
             const lenderLoanIds = await lending.getLenderLoans(addr);
             expect(BigInt(lenderLoanIds.length)).to.equal(expectedLenderActive.get(addr));
@@ -157,8 +168,9 @@ describe("Stateful Protocol Accounting Invariants (Issue #57)", function () {
             const revertingAddr = await revertingFeeRecipient.getAddress();
 
             const Lending = await ethers.getContractFactory("SocialLendingWithCollateral");
-            const lending = await Lending.deploy(owner.address);
-            await lending.waitForDeployment();
+            const deployed = await Lending.deploy(owner.address);
+            await deployed.waitForDeployment();
+            const lending = wrapWithTimelock(deployed, [feed18, feed6]);
             const lendingAddr = await lending.getAddress();
 
             const t18Addr = await token18.getAddress();
