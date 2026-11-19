@@ -70,6 +70,27 @@ async function advanceTime(seconds: number) {
     await network.provider.send("evm_mine");
 }
 
+/**
+ * Asserts that a call reverts with the given custom error. Decodes revert data via the ABI when
+ * available and falls back to the error message text for providers that only surface strings.
+ */
+async function expectCustomErrorRevert(
+    iface: { parseError(data: string): { name: string } | null },
+    call: () => Promise<unknown>,
+    errorName: string,
+    label: string
+): Promise<void> {
+    try {
+        await call();
+    } catch (err: any) {
+        const data = typeof err?.data === "string" ? err.data : err?.data?.data;
+        const decoded = typeof data === "string" ? iface.parseError(data)?.name : undefined;
+        if (decoded === errorName || String(err?.message ?? err).includes(errorName)) return;
+        throw new Error(`${label} reverted with unexpected error: ${err?.message ?? err}`);
+    }
+    throw new Error(`${label} should have reverted`);
+}
+
 export async function runE2EVerification(options: { silent?: boolean } = {}): Promise<E2EReport> {
     const log = (...args: any[]) => {
         if (!options.silent) {
@@ -396,13 +417,8 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     // =========================================================================
     log("[E2E][Phase 6] Running 48-hour timelock queue/cancel/execute and two-step ownership transfer...");
 
-    // enableTimelock() is disabled (already enabled by default); verify it reverts
-    try {
-        await lending.enableTimelock();
-        throw new Error("enableTimelock should have reverted");
-    } catch (err: any) {
-        if (err.message === "enableTimelock should have reverted") throw err;
-    }
+    // enableTimelock() is disabled (already enabled by default); verify it reverts with InvalidParameter
+    await expectCustomErrorRevert(lending.interface, () => lending.enableTimelock(), "InvalidParameter", "enableTimelock");
 
     const setFeeSelector = lending.interface.getFunction("setPlatformFee").selector;
 
@@ -427,13 +443,13 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
 
     await lending.transferOwnership(newOwner.address);
     await lending.connect(newOwner).acceptOwnership();
-    // renounceOwnership() is disabled (#67); verify it reverts and ownership remains with newOwner
-    try {
-        await lending.connect(newOwner).renounceOwnership();
-        throw new Error("renounceOwnership should have reverted");
-    } catch (err: any) {
-        if (err.message === "renounceOwnership should have reverted") throw err;
-    }
+    // renounceOwnership() is disabled (#67); verify it reverts with InvalidParameter and ownership remains with newOwner
+    await expectCustomErrorRevert(
+        lending.interface,
+        () => lending.connect(newOwner).renounceOwnership(),
+        "InvalidParameter",
+        "renounceOwnership"
+    );
 
     phasesCompleted = 6;
 

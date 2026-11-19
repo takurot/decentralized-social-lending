@@ -263,6 +263,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable 
     constructor(address _feeRecipient) {
         if (_feeRecipient == address(0)) revert InvalidAddress();
         feeRecipient = _feeRecipient;
+        emit TimelockEnabled();
     }
 
     /**

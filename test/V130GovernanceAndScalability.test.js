@@ -37,8 +37,10 @@ describe("v1.3.0 Governance, Lifecycle, Scalability, and TypeScript Infra (#44, 
     });
 
     describe("Issue #44 & #67: Timelock enabled by default, Ownable2Step, and disabled renounceOwnership", function () {
-        it("should have timelockEnabled == true immediately upon deployment and reject enableTimelock()", async function () {
+        it("should have timelockEnabled == true immediately upon deployment, emit TimelockEnabled, and reject enableTimelock()", async function () {
             expect(await lending.timelockEnabled()).to.equal(true);
+            const deployTx = lending.deploymentTransaction();
+            await expect(deployTx).to.emit(lending, "TimelockEnabled");
             await expect(lending.enableTimelock()).to.be.revertedWithCustomError(lending, "InvalidParameter");
             await expect(lending.connect(borrower).enableTimelock()).to.be.revertedWith(
                 "Ownable: caller is not the owner"

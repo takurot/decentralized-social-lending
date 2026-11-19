@@ -42,11 +42,15 @@ async function execTimelocked(lending, fnName, args, feeds = []) {
     if (!types) {
         return lending[fnName](...args);
     }
+    const timelockDelay =
+        typeof lending.TIMELOCK_DELAY === "function"
+            ? Number(await lending.TIMELOCK_DELAY())
+            : TIMELOCK_DELAY;
     const selector = lending.interface.getFunction(fnName).selector;
     const resolvedArgs = await Promise.all(args);
     const params = ethers.AbiCoder.defaultAbiCoder().encode(types, resolvedArgs);
     await lending.queueChange(selector, params);
-    await network.provider.send("evm_increaseTime", [TIMELOCK_DELAY + 1]);
+    await network.provider.send("evm_increaseTime", [timelockDelay + 1]);
     await network.provider.send("evm_mine");
     for (const feed of feeds) {
         await refreshPriceFeed(feed);
@@ -76,12 +80,13 @@ function wrapWithTimelock(lending, feeds = []) {
             }
             if (typeof prop === "string" && TIMELOCKED_SETTERS[prop] && typeof value === "function") {
                 return async (...args) => {
-                    // Probe staticCall first: if it reverts with anything OTHER than ChangeNotQueued
-                    // (e.g., Ownable, InvalidParameter, InvalidAddress, StaleData, CollateralLocked),
-                    // execute directly so the caller's expect(...).to.be.reverted* sees the exact revert!
+                    // Probe staticCall first (before advancing time or refreshing feeds so intentional
+                    // config-time StaleData / InvalidPriceData tests fail fast before queuing).
+                    // If staticCall succeeds (e.g., already queued & mature), execute directly.
                     const resolvedArgs = await Promise.all(args);
                     try {
                         await target[prop].staticCall(...resolvedArgs);
+                        return value.apply(target, resolvedArgs);
                     } catch (err) {
                         const msg = (err && (err.message || String(err))) || "";
                         if (!msg.includes("ChangeNotQueued")) {
