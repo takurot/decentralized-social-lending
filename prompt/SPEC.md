@@ -342,7 +342,7 @@ uint256 public cancelledLoansCount;
 - **トークン・ETH 送金ヘルパーの実装方針（EIP-170 サイズ対策）**:
   - 本仕様中の擬似コードの `safeTransfer` / `sendValue` は、実装では `_safeTransferToken` / `_requireETHTransfer`（低レベル `call`）に置き換えている。
   - ERC-20 送金の失敗はすべて `InvalidCollateral`、`withdrawETHTo` / `rescueETH` の ETH 送金失敗はすべて `InvalidParameter` で revert する（失敗原因ごとの区別はしない）。
-  - 送信先コードの存在確認は入金時（残高差分検証）と許可リスト登録時に行う。出金側 `_callERC20` は `token.code` を確認しない。EIP-6780 以降、稼働中トークンのコードが消える経路は実質存在しないため許容している。
+  - 送信先コードの存在は入金時の残高差分検証で保証する（許可リスト登録時の `token.code.length` は `decimals()` 自動取得の可否判定にのみ使い、コードなしアドレスの登録自体は拒否しない）。出金側 `_callERC20` は `token.code` を確認しない。EIP-6780 以降、稼働中トークンのコードが消える経路は実質存在しないため許容している。
 - **所有権移転と Timelock キュー**: `pendingChanges` は所有者に紐づかないため、`acceptOwnership` 後も旧所有者が queue した変更は新所有者が（猶予期間内に）実行できる。新所有者は移転直後に未実行のキューを確認し、不要なものを `cancelChange` すること。
 
 ---
