@@ -8,7 +8,13 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '20', cache: 'npm' }
       - run: npm ci
-      - run: npx hardhat compile
+      - name: Check production dependency vulnerabilities
+        run: npm audit --omit=dev --audit-level=high
+      - name: Run TypeScript typecheck
+        run: npx tsc --noEmit
+      - run: npx hardhat compile --force
+      - name: Check zero compiler warnings and Solidity static rules
+        run: node scripts/check-warnings.js
       - run: npx hardhat test
       - run: npx hardhat coverage
       - name: Check coverage thresholds
