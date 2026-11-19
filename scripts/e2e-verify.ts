@@ -72,7 +72,7 @@ async function advanceTime(seconds: number) {
 
 /**
  * Asserts that a call reverts with the given custom error. Decodes revert data via the ABI when
- * available and falls back to the error message text for providers that only surface strings.
+ * present; the error message text is consulted only when the provider returns no revert data.
  */
 async function expectCustomErrorRevert(
     iface: { parseError(data: string): { name: string } | null },
@@ -84,8 +84,11 @@ async function expectCustomErrorRevert(
         await call();
     } catch (err: any) {
         const data = typeof err?.data === "string" ? err.data : err?.data?.data;
-        const decoded = typeof data === "string" ? iface.parseError(data)?.name : undefined;
-        if (decoded === errorName || String(err?.message ?? err).includes(errorName)) return;
+        if (typeof data === "string" && data !== "0x") {
+            if (iface.parseError(data)?.name === errorName) return;
+        } else if (String(err?.message ?? err).includes(errorName)) {
+            return;
+        }
         throw new Error(`${label} reverted with unexpected error: ${err?.message ?? err}`);
     }
     throw new Error(`${label} should have reverted`);
