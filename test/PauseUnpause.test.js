@@ -86,14 +86,17 @@ describe("Pause/Unpause Functionality", function () {
             ).to.be.revertedWith("Pausable: paused");
         });
 
-        it("should revert repayLoan when paused", async function () {
+        it("should allow repayLoan when paused so borrowers can unwind active loans", async function () {
             // Fund loan first
             await socialLending.connect(lender).fundLoan(0, { value: LOAN_AMOUNT });
 
             await socialLending.pause();
+            const loan = await socialLending.loans(0);
             await expect(
-                socialLending.connect(borrower).repayLoan(0, { value: LOAN_AMOUNT })
-            ).to.be.revertedWith("Pausable: paused");
+                socialLending.connect(borrower).repayLoan(0, { value: loan.remainingRepaymentAmount })
+            )
+                .to.emit(socialLending, "LoanRepaid")
+                .withArgs(0, borrower.address, lender.address, loan.remainingRepaymentAmount);
         });
 
         it("should revert declareDefault when paused", async function () {
@@ -124,7 +127,7 @@ describe("Pause/Unpause Functionality", function () {
             ).to.be.revertedWith("Pausable: paused");
         });
 
-        it("should allow cancelLoanRequest while paused while keeping requestLoan, fundLoan, and repayLoan blocked", async function () {
+        it("should allow cancelLoanRequest while paused while keeping requestLoan and fundLoan blocked", async function () {
             const tokenAddr = await mockToken.getAddress();
             const borrowerBefore = await mockToken.balanceOf(borrower.address);
 
@@ -135,9 +138,6 @@ describe("Pause/Unpause Functionality", function () {
             ).to.be.revertedWith("Pausable: paused");
             await expect(
                 socialLending.connect(lender).fundLoan(0, { value: LOAN_AMOUNT })
-            ).to.be.revertedWith("Pausable: paused");
-            await expect(
-                socialLending.connect(borrower).repayLoan(0, { value: LOAN_AMOUNT })
             ).to.be.revertedWith("Pausable: paused");
 
             await expect(

@@ -809,7 +809,7 @@ pragma solidity 0.8.24;
 describe("Pause/Unpause", function () {
     it("pause中はrequestLoanが失敗すること", async function () { ... });
     it("pause中はfundLoanが失敗すること", async function () { ... });
-    it("pause中はrepayLoanが失敗すること", async function () { ... });
+    it("pause中もrepayLoanでアクティブローンの返済・担保回収が可能であること", async function () { ... });
     it("非オーナーはpauseできないこと", async function () { ... });
     it("unpause後に全機能が復帰すること", async function () { ... });
 });

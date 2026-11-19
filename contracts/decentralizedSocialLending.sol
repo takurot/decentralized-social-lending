@@ -46,6 +46,8 @@ error InsufficientUnlockedETH();
 error CollateralSufficient();
 error NoDebtToLiquidate();
 error TokenDecimalsNotSet();
+error CollateralLocked();
+error LoanRequestExpired();
 
 /**
  * @title SocialLendingWithCollateral
@@ -61,7 +63,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     uint256 public constant MAX_INTEREST_RATE = 2000; // 20%
     uint256 public constant MAX_PLATFORM_FEE = 500;  // 5%
     uint256 public constant SECONDS_PER_YEAR = 365 days;
-    uint256 public constant PRICE_FEED_TIMEOUT = 1 hours; // Price feed staleness timeout
+    uint256 public constant PRICE_FEED_TIMEOUT = 1 hours; // Default price feed staleness timeout
+    uint256 public constant MIN_PRICE_FEED_TIMEOUT = 5 minutes;
+    uint256 public constant MAX_PRICE_FEED_TIMEOUT = 48 hours;
+    uint256 public constant ORACLE_FALLBACK_DELAY = 7 days;
+    uint256 public constant LOAN_REQUEST_EXPIRATION = 30 days;
     uint256 public constant MAX_LOAN_DURATION = 365 days; // Maximum loan duration
     uint256 public constant MAX_GRACE_PERIOD = 30 days; // Maximum grace period
 
@@ -86,10 +92,12 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     /// @notice Core loan data packed to minimize storage slots.
     struct Loan {
-        // Slot 1: borrower (20) + state (1) + interestRate (2) = 23 bytes
+        // Slot 1: borrower (20) + state (1) + interestRate (2) + platformFeeRate (2) + expiresAt (6) = 31 bytes
         address payable borrower;
         LoanState state;         // Loan state (1 byte)
         uint16 interestRate;     // Interest rate in basis points (2 bytes)
+        uint16 platformFeeRate;  // Platform fee in basis points at origination (2 bytes)
+        uint48 expiresAt;        // Request expiration timestamp (6 bytes)
 
         // Slot 2: lender (20)
         address payable lender;
@@ -157,8 +165,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     mapping(address => uint8) public collateralTokenDecimals;
     mapping(address => bool) public collateralDecimalsSet;
 
-    // Oracle mapping (collateral token => price feed)
+    // Oracle mapping (collateral token => price feed) and per-token staleness timeouts
     mapping(address => address) public priceFeeds;
+    mapping(address => uint256) public priceFeedTimeouts;
 
     // Platform fee in basis points
     uint256 public platformFee = 100; // 1%
@@ -217,6 +226,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     event DefaultDeclared(uint256 indexed loanId, address indexed lender, uint256 seizedCollateral, uint256 surplusCollateral);
     event LoanCancelled(uint256 indexed loanId, address indexed borrower);
     event PriceFeedUpdated(address indexed token, address indexed priceFeed);
+    event PriceFeedTimeoutUpdated(address indexed token, uint256 timeout);
     event PlatformFeeUpdated(uint256 newFee);
     event FeeRecipientUpdated(address indexed newRecipient);
     event CollateralRatioUpdated(uint256 newRatio);
@@ -271,11 +281,6 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         maxLoanAmount = _maxLoanAmount;
         emit MaxLoanAmountUpdated(_maxLoanAmount);
     }
-
-    /**
-     * @notice Allows the contract to receive ETH
-     */
-    receive() external payable {}
 
     /*
     Core Protocol Workflow:
@@ -392,10 +397,34 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function setCollateralTokenDecimals(address token, uint8 decimals) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
         if (decimals > 18) revert InvalidParameter();
+        if (lockedCollateral[token] > 0) revert CollateralLocked();
         _consumeTimelock(msg.sig, abi.encode(token, decimals));
         collateralTokenDecimals[token] = decimals;
         collateralDecimalsSet[token] = true;
         emit CollateralTokenDecimalsUpdated(token, decimals);
+    }
+
+    /**
+     * @notice Gets the effective price feed staleness timeout for a collateral token
+     * @param token The address of the collateral token
+     * @return The effective staleness timeout in seconds
+     */
+    function getEffectivePriceFeedTimeout(address token) public view returns (uint256) {
+        uint256 timeout = priceFeedTimeouts[token];
+        return timeout == 0 ? PRICE_FEED_TIMEOUT : timeout;
+    }
+
+    /**
+     * @notice Sets a custom price feed staleness timeout for a collateral token
+     * @param token The address of the collateral token
+     * @param timeout The staleness timeout in seconds (between MIN_PRICE_FEED_TIMEOUT and MAX_PRICE_FEED_TIMEOUT)
+     */
+    function setPriceFeedTimeout(address token, uint256 timeout) external onlyOwner {
+        if (token == address(0)) revert InvalidAddress();
+        if (timeout < MIN_PRICE_FEED_TIMEOUT || timeout > MAX_PRICE_FEED_TIMEOUT) revert InvalidParameter();
+        _consumeTimelock(msg.sig, abi.encode(token, timeout));
+        priceFeedTimeouts[token] = timeout;
+        emit PriceFeedTimeoutUpdated(token, timeout);
     }
 
     /**
@@ -404,20 +433,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @param priceFeed The address of the price feed contract
      */
     function setPriceFeed(address token, address priceFeed) external onlyOwner {
-        if (token == address(0) || priceFeed == address(0)) revert InvalidAddress();
-        if (priceFeed.code.length == 0) revert InvalidAddress();
-
-        AggregatorV3Interface feed = AggregatorV3Interface(priceFeed);
-        try feed.decimals() returns (uint8 feedDecimals) {
-            if (feedDecimals > 18) revert InvalidPriceData();
-        } catch {
-            revert InvalidPriceData();
-        }
-        try feed.latestRoundData() returns (uint80, int256 price, uint256, uint256, uint80) {
-            if (price <= 0) revert InvalidPriceData();
-        } catch {
-            revert InvalidPriceData();
-        }
+        if (token == address(0) || priceFeed == address(0) || priceFeed.code.length == 0) revert InvalidAddress();
+        (uint8 err, , ) = _probeOracle(token, priceFeed);
+        _revertOracleError(err);
 
         _consumeTimelock(msg.sig, abi.encode(token, priceFeed));
         priceFeeds[token] = priceFeed;
@@ -494,8 +512,16 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function fundLoan(uint256 loanId) external payable nonReentrant validLoanId(loanId) whenNotPaused {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Requested) revert InvalidLoanState();
+        if (block.timestamp > loan.expiresAt) revert LoanRequestExpired();
         if (msg.value != loan.principalAmount) revert IncorrectFundingAmount();
         if (loan.borrower == msg.sender) revert SelfFunding();
+        if (!allowedCollateralTokens[loan.collateralToken]) revert TokenNotAllowed();
+        _validateCollateralValue(
+            loan.collateralToken,
+            loan.collateralAmount,
+            loan.repaymentAmount,
+            collateralRatio
+        );
 
         // Update state before external calls (Checks-Effects-Interactions)
         loan.lender = payable(msg.sender);
@@ -511,16 +537,16 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         rep.totalBorrowedAmount += loan.principalAmount;
         _touchReputation(loan.borrower, rep);
 
-        _disburseLoanProceeds(loan.borrower, msg.value);
+        _disburseLoanProceeds(loan.borrower, msg.value, loan.platformFeeRate);
 
         emit LoanFunded(loanId, msg.sender);
     }
 
     /**
-     * @notice Allows the borrower to repay the loan, supporting partial repayments
+     * @notice Allows the borrower to repay the loan, supporting partial repayments (callable even while paused)
      * @param loanId The ID of the loan to repay
      */
-    function repayLoan(uint256 loanId) external payable nonReentrant validLoanId(loanId) onlyBorrower(loanId) whenNotPaused {
+    function repayLoan(uint256 loanId) external payable nonReentrant validLoanId(loanId) onlyBorrower(loanId) {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
         if (msg.value == 0) revert InvalidAmount();
@@ -565,15 +591,28 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     }
 
     /**
-     * @notice Withdraws queued ETH that failed direct push transfer
+     * @notice Withdraws queued ETH that failed direct push transfer to msg.sender
      */
     function withdrawETH() external nonReentrant {
+        _withdrawETHTo(payable(msg.sender));
+    }
+
+    /**
+     * @notice Withdraws queued ETH that failed direct push transfer to a specified recipient address
+     * @param recipient The payable recipient address to receive the queued ETH
+     */
+    function withdrawETHTo(address payable recipient) external nonReentrant {
+        if (recipient == address(0)) revert InvalidAddress();
+        _withdrawETHTo(recipient);
+    }
+
+    function _withdrawETHTo(address payable recipient) internal {
         uint256 amount = pendingETHWithdrawals[msg.sender];
         if (amount == 0) revert InvalidAmount();
         pendingETHWithdrawals[msg.sender] = 0;
         lockedETH -= amount;
-        payable(msg.sender).sendValue(amount);
-        emit ETHWithdrawn(msg.sender, amount);
+        recipient.sendValue(amount);
+        emit ETHWithdrawn(recipient, amount);
     }
 
     /**
@@ -611,14 +650,28 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
     function _executeDefault(uint256 loanId) internal {
         Loan storage loan = loans[loanId];
         if (loan.state != LoanState.Funded) revert InvalidLoanState();
-        if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
+        uint256 defaultEligibleAt = loan.startTime + loan.duration + gracePeriod;
+        if (block.timestamp <= defaultEligibleAt) revert LoanNotExpired();
 
-        uint256 collateralValue = getCollateralValueInETH(loan.collateralToken, loan.collateralAmount);
-        (uint256 seizeAmount, uint256 surplusCollateral) = _calculateSeizure(
-            loan.collateralAmount,
-            collateralValue,
-            loan.remainingRepaymentAmount
+        (uint8 err, uint256 collateralValue) = _tryGetCollateralValueInETH(
+            loan.collateralToken,
+            loan.collateralAmount
         );
+        uint256 seizeAmount;
+        uint256 surplusCollateral;
+        if (err == 0) {
+            (seizeAmount, surplusCollateral) = _calculateSeizure(
+                loan.collateralAmount,
+                collateralValue,
+                loan.remainingRepaymentAmount
+            );
+        } else {
+            if (block.timestamp <= defaultEligibleAt + ORACLE_FALLBACK_DELAY) {
+                _revertOracleError(err);
+            }
+            seizeAmount = loan.collateralAmount;
+            surplusCollateral = 0;
+        }
 
         // Update state before external calls (Checks-Effects-Interactions)
         _closeFundedLoan(loan, LoanState.Defaulted);
@@ -683,38 +736,66 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @return The value in ETH
      */
     function getCollateralValueInETH(address collateralToken, uint256 collateralAmount) public view returns (uint256) {
+        (uint8 err, uint256 value) = _tryGetCollateralValueInETH(collateralToken, collateralAmount);
+        _revertOracleError(err);
+        return value;
+    }
+
+    function _tryGetCollateralValueInETH(
+        address collateralToken,
+        uint256 collateralAmount
+    ) internal view returns (uint8 err, uint256 value) {
         address priceFeedAddress = priceFeeds[collateralToken];
-        if (priceFeedAddress == address(0)) revert PriceFeedNotAvailable();
+        if (priceFeedAddress == address(0)) return (1, 0);
 
-        AggregatorV3Interface priceFeed = AggregatorV3Interface(priceFeedAddress);
+        uint256 price;
+        uint8 decimals;
+        (err, price, decimals) = _probeOracle(collateralToken, priceFeedAddress);
+        if (err != 0) return (err, 0);
+        if (!collateralDecimalsSet[collateralToken]) return (4, 0);
 
-        // Fetch and validate oracle price data
-        (
+        uint8 tokenDecimals = collateralTokenDecimals[collateralToken];
+        uint256 normalizedAmount = Math.mulDiv(collateralAmount, 1e18, 10 ** uint256(tokenDecimals));
+        value = Math.mulDiv(normalizedAmount, price, 10 ** uint256(decimals));
+    }
+
+    function _probeOracle(
+        address token,
+        address priceFeedAddress
+    ) internal view returns (uint8 err, uint256 validPrice, uint8 feedDecimals) {
+        AggregatorV3Interface feed = AggregatorV3Interface(priceFeedAddress);
+        try feed.decimals() returns (uint8 dec) {
+            if (dec > 18) return (2, 0, 0);
+            feedDecimals = dec;
+        } catch {
+            return (2, 0, 0);
+        }
+
+        try feed.latestRoundData() returns (
             uint80 roundId,
             int256 price,
             uint256 startedAt,
             uint256 updatedAt,
             uint80 answeredInRound
-        ) = priceFeed.latestRoundData();
-
-        // Validate oracle price data
-        if (price <= 0) revert InvalidPriceData();
-        if (startedAt == 0 || updatedAt == 0 || updatedAt < startedAt || updatedAt > block.timestamp) {
-            revert InvalidPriceData();
+        ) {
+            if (price <= 0 || startedAt == 0 || updatedAt == 0 || updatedAt < startedAt || updatedAt > block.timestamp) {
+                return (2, 0, 0);
+            }
+            if (block.timestamp - updatedAt > getEffectivePriceFeedTimeout(token) || answeredInRound < roundId) {
+                return (3, 0, 0);
+            }
+            validPrice = uint256(price);
+        } catch {
+            return (2, 0, 0);
         }
-        if (block.timestamp - updatedAt > PRICE_FEED_TIMEOUT) revert StaleData();
-        if (answeredInRound < roundId) revert StaleData();
+    }
 
-        if (!collateralDecimalsSet[collateralToken]) revert TokenDecimalsNotSet();
-
-        uint8 decimals = priceFeed.decimals();
-        if (decimals > 18) revert InvalidPriceData();
-        uint8 tokenDecimals = collateralTokenDecimals[collateralToken];
-
-        // Normalize collateral amount using token decimals and Math.mulDiv
-        uint256 normalizedAmount = Math.mulDiv(collateralAmount, 1e18, 10 ** uint256(tokenDecimals));
-        uint256 collateralValueInETH = Math.mulDiv(normalizedAmount, uint256(price), 10 ** uint256(decimals));
-        return collateralValueInETH;
+    function _revertOracleError(uint8 err) internal pure {
+        if (err == 0) return;
+        if (err == 1) revert PriceFeedNotAvailable();
+        if (err == 2) revert InvalidPriceData();
+        if (err == 3) revert StaleData();
+        revert TokenDecimalsNotSet();
     }
 
     /**
@@ -959,7 +1040,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (token == address(0) || to == address(0)) revert InvalidAddress();
         uint256 contractBalance = IERC20(token).balanceOf(address(this));
         uint256 locked = lockedCollateral[token];
-        if (contractBalance < locked + amount) revert InsufficientUnlockedCollateral();
+        if (contractBalance < locked || amount > contractBalance - locked) {
+            revert InsufficientUnlockedCollateral();
+        }
         IERC20(token).safeTransfer(to, amount);
         emit TokensRescued(token, amount, to);
     }
@@ -1069,7 +1152,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         activeLoansCount++;
         _lenderLoanIds[offer.lender].push(loanId);
 
-        _disburseLoanProceeds(msg.sender, principal);
+        _disburseLoanProceeds(msg.sender, principal, loan.platformFeeRate);
 
         emit LoanOfferAccepted(offerId, loanId, msg.sender);
     }
@@ -1094,6 +1177,8 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             lender: payable(address(0)),
             principalAmount: principalAmount,
             interestRate: uint16(interestRate),
+            platformFeeRate: uint16(platformFee),
+            expiresAt: uint48(block.timestamp + LOAN_REQUEST_EXPIRATION),
             repaymentAmount: repaymentAmount,
             duration: duration,
             startTime: 0,
@@ -1122,9 +1207,28 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 interestRate,
         uint256 duration
     ) internal pure returns (uint256) {
-        uint256 annualInterest = Math.mulDiv(principal, interestRate, BASIS_POINTS);
-        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
+        uint256 interestAmount = Math.mulDiv(
+            principal,
+            interestRate * duration,
+            BASIS_POINTS * SECONDS_PER_YEAR
+        );
         return principal + interestAmount;
+    }
+
+    function _validateCollateralValue(
+        address collateralToken,
+        uint256 actualCollateral,
+        uint256 repaymentAmount,
+        uint256 requiredRatio
+    ) internal view {
+        uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
+        uint256 requiredCollateralValueInETH = Math.mulDiv(
+            repaymentAmount,
+            requiredRatio,
+            BASIS_POINTS,
+            Math.Rounding.Up
+        );
+        if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
     }
 
     function _depositAndValidateCollateral(
@@ -1138,20 +1242,12 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
         if (actualCollateral == 0) revert InvalidCollateral();
 
-        uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
-        uint256 requiredCollateralValueInETH = Math.mulDiv(
-            repaymentAmount,
-            requiredRatio,
-            BASIS_POINTS,
-            Math.Rounding.Up
-        );
-        if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
-
+        _validateCollateralValue(collateralToken, actualCollateral, repaymentAmount, requiredRatio);
         lockedCollateral[collateralToken] += actualCollateral;
     }
 
-    function _disburseLoanProceeds(address borrower, uint256 principal) internal {
-        uint256 feeAmount = principal * platformFee / BASIS_POINTS;
+    function _disburseLoanProceeds(address borrower, uint256 principal, uint256 feeRate) internal {
+        uint256 feeAmount = Math.mulDiv(principal, feeRate, BASIS_POINTS);
         uint256 amountToBorrower = principal - feeAmount;
         _safeTransferETHOrQueue(feeRecipient, feeAmount);
         _safeTransferETHOrQueue(borrower, amountToBorrower);
@@ -1165,7 +1261,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         uint256 seizeValue = Math.mulDiv(debtAmount, BASIS_POINTS + liquidationBonus, BASIS_POINTS);
         seizeAmount = seizeValue >= collateralValue
             ? collateralAmount
-            : Math.mulDiv(collateralAmount, seizeValue, collateralValue);
+            : Math.mulDiv(collateralAmount, seizeValue, collateralValue, Math.Rounding.Up);
         surplusCollateral = collateralAmount - seizeAmount;
     }
 

@@ -60,7 +60,7 @@ describe("Collateral Liquidation (PR-06)", function () {
         );
         const bonus = await socialLending.liquidationBonus(); // 500 = 5%
         const seizeValue = (debtRepaid * (BASIS_POINTS + bonus)) / BASIS_POINTS;
-        const expectedSeize = (COLLATERAL_AMOUNT * seizeValue) / collateralValue;
+        const expectedSeize = (COLLATERAL_AMOUNT * seizeValue + collateralValue - 1n) / collateralValue;
         const expectedSurplus = COLLATERAL_AMOUNT - expectedSeize;
 
         const lenderBalanceBefore = await ethers.provider.getBalance(lender.address);

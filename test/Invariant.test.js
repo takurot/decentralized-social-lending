@@ -309,7 +309,11 @@ describe("Stateful Protocol Accounting Invariants (Issue #57)", function () {
                         await lending.rescueTokens(t18Addr, extraTokens, owner.address);
 
                         const extraETH = ethers.parseEther("0.1");
-                        await owner.sendTransaction({ to: lendingAddr, value: extraETH });
+                        const curBal = await ethers.provider.getBalance(lendingAddr);
+                        await ethers.provider.send("hardhat_setBalance", [
+                            lendingAddr,
+                            ethers.toBeHex(curBal + extraETH),
+                        ]);
                         await lending.rescueETH(extraETH, owner.address);
                     }
                 } catch {
