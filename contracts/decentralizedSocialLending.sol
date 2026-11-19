@@ -307,26 +307,42 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
 
     /// @dev Restricts caller to the loan borrower.
     modifier onlyBorrower(uint256 loanId) {
-        if (msg.sender != loans[loanId].borrower) revert Unauthorized();
+        _checkOnlyBorrower(loanId);
         _;
     }
 
     /// @dev Restricts caller to the loan lender.
     modifier onlyLender(uint256 loanId) {
-        if (msg.sender != loans[loanId].lender) revert Unauthorized();
+        _checkOnlyLender(loanId);
         _;
     }
 
     /// @dev Validates that loanId exists.
     modifier validLoanId(uint256 loanId) {
-        if (loanId >= loanCount) revert InvalidLoanId();
+        _checkValidLoanId(loanId);
         _;
     }
 
     /// @dev Validates that offerId exists.
     modifier validOfferId(uint256 offerId) {
-        if (offerId >= offerCount) revert InvalidOfferId();
+        _checkValidOfferId(offerId);
         _;
+    }
+
+    function _checkOnlyBorrower(uint256 loanId) internal view {
+        if (msg.sender != loans[loanId].borrower) revert Unauthorized();
+    }
+
+    function _checkOnlyLender(uint256 loanId) internal view {
+        if (msg.sender != loans[loanId].lender) revert Unauthorized();
+    }
+
+    function _checkValidLoanId(uint256 loanId) internal view {
+        if (loanId >= loanCount) revert InvalidLoanId();
+    }
+
+    function _checkValidOfferId(uint256 offerId) internal view {
+        if (offerId >= offerCount) revert InvalidOfferId();
     }
 
     /**
@@ -426,54 +442,27 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (amount == 0) revert InvalidAmount();
         if (interestRate == 0 || interestRate > MAX_INTEREST_RATE) revert InvalidInterestRate();
         if (duration == 0 || duration > MAX_LOAN_DURATION) revert InvalidDuration();
-        if (collateralAmount == 0) revert InvalidCollateral();
-        if (collateralToken == address(0)) revert InvalidAddress();
-        if (!allowedCollateralTokens[collateralToken]) revert TokenNotAllowed();
+        _validateCollateralInput(collateralToken, collateralAmount);
 
         if (amount > maxLoanAmount) revert LoanTooLarge();
         if (borrowerActiveLoans[msg.sender] >= maxActiveLoansPerBorrower) revert TooManyActiveLoans();
 
-        // Deposit collateral and measure actual received amount (fee-on-transfer protection)
-        uint256 balanceBefore = IERC20(collateralToken).balanceOf(address(this));
-        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
-        uint256 actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
-        if (actualCollateral == 0) revert InvalidCollateral();
-
-        // Calculate total repayment with simple interest using Math.mulDiv
-        uint256 annualInterest = Math.mulDiv(amount, interestRate, BASIS_POINTS);
-        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
-        uint256 repaymentAmount = amount + interestAmount;
-
-        // Evaluate collateral value against total repayment amount
-        uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
-        uint256 requiredCollateralValueInETH = Math.mulDiv(
+        uint256 repaymentAmount = _calculateRepaymentAmount(amount, interestRate, duration);
+        uint256 actualCollateral = _depositAndValidateCollateral(
+            collateralToken,
+            collateralAmount,
             repaymentAmount,
-            collateralRatio,
-            BASIS_POINTS,
-            Math.Rounding.Up
+            collateralRatio
         );
-        if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
 
-        lockedCollateral[collateralToken] += actualCollateral;
-
-        uint256 loanId = loanCount++;
-
-        loans[loanId] = Loan({
-            borrower: payable(msg.sender),
-            lender: payable(address(0)),
-            principalAmount: amount,
-            interestRate: uint16(interestRate),
-            repaymentAmount: repaymentAmount,
-            duration: duration,
-            startTime: 0,
-            state: LoanState.Requested,
-            collateralToken: collateralToken,
-            collateralAmount: actualCollateral,
-            remainingRepaymentAmount: repaymentAmount
-        });
-
-        borrowerActiveLoans[msg.sender]++;
-        _borrowerLoanIds[msg.sender].push(loanId);
+        uint256 loanId = _createLoanRecord(
+            amount,
+            interestRate,
+            repaymentAmount,
+            duration,
+            collateralToken,
+            actualCollateral
+        );
 
         emit LoanRequested(loanId, msg.sender, amount, interestRate, duration, collateralToken, actualCollateral);
     }
@@ -520,18 +509,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         UserReputation storage rep = userReputations[loan.borrower];
         rep.totalLoans++;
         rep.totalBorrowedAmount += loan.principalAmount;
-        rep.lastActivityTimestamp = block.timestamp;
-        emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+        _touchReputation(loan.borrower, rep);
 
-        // Calculate and transfer platform fee
-        uint256 feeAmount = msg.value * platformFee / BASIS_POINTS;
-        uint256 amountToBorrower = msg.value - feeAmount;
-
-        // Transfer fee (queued for pull-payment if direct transfer fails)
-        _safeTransferETHOrQueue(feeRecipient, feeAmount);
-
-        // Transfer principal minus fee to borrower (queued on failure)
-        _safeTransferETHOrQueue(loan.borrower, amountToBorrower);
+        _disburseLoanProceeds(loan.borrower, msg.value);
 
         emit LoanFunded(loanId, msg.sender);
     }
@@ -554,21 +534,14 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             // Full repayment
             excessAmount = amount - loan.remainingRepaymentAmount;
             amount = loan.remainingRepaymentAmount;
-            loan.remainingRepaymentAmount = 0;
-            loan.state = LoanState.Repaid;
-            borrowerActiveLoans[loan.borrower]--;
-            lenderActiveLoans[loan.lender]--;
-
-            activeLoansCount--;
+            _closeFundedLoan(loan, LoanState.Repaid);
             repaidLoansCount++;
 
             rep.repaidLoans++;
             rep.totalRepaidAmount += amount;
-            rep.lastActivityTimestamp = block.timestamp;
-            emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+            _touchReputation(loan.borrower, rep);
 
             // Return collateral
-            lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
             IERC20(loan.collateralToken).safeTransfer(loan.borrower, loan.collateralAmount);
 
             emit LoanRepaid(loanId, loan.borrower, loan.lender, amount);
@@ -577,8 +550,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
             loan.remainingRepaymentAmount -= amount;
 
             rep.totalRepaidAmount += amount;
-            rep.lastActivityTimestamp = block.timestamp;
-            emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+            _touchReputation(loan.borrower, rep);
 
             emit LoanPartiallyRepaid(loanId, loan.borrower, amount, loan.remainingRepaymentAmount);
         }
@@ -642,27 +614,20 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (block.timestamp <= loan.startTime + loan.duration + gracePeriod) revert LoanNotExpired();
 
         uint256 collateralValue = getCollateralValueInETH(loan.collateralToken, loan.collateralAmount);
-        uint256 seizeValue = Math.mulDiv(loan.remainingRepaymentAmount, BASIS_POINTS + liquidationBonus, BASIS_POINTS);
-        uint256 seizeAmount = seizeValue >= collateralValue
-            ? loan.collateralAmount
-            : Math.mulDiv(loan.collateralAmount, seizeValue, collateralValue);
-        uint256 surplusCollateral = loan.collateralAmount - seizeAmount;
+        (uint256 seizeAmount, uint256 surplusCollateral) = _calculateSeizure(
+            loan.collateralAmount,
+            collateralValue,
+            loan.remainingRepaymentAmount
+        );
 
         // Update state before external calls (Checks-Effects-Interactions)
-        loan.remainingRepaymentAmount = 0;
-        loan.state = LoanState.Defaulted;
-        borrowerActiveLoans[loan.borrower]--;
-        lenderActiveLoans[loan.lender]--;
-
-        activeLoansCount--;
+        _closeFundedLoan(loan, LoanState.Defaulted);
         defaultedLoansCount++;
 
         UserReputation storage rep = userReputations[loan.borrower];
         rep.defaultedLoans++;
-        rep.lastActivityTimestamp = block.timestamp;
-        emit ReputationUpdated(loan.borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+        _touchReputation(loan.borrower, rep);
 
-        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
         IERC20(loan.collateralToken).safeTransfer(loan.lender, seizeAmount);
         if (surplusCollateral > 0) {
             IERC20(loan.collateralToken).safeTransfer(loan.borrower, surplusCollateral);
@@ -688,20 +653,15 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (msg.value < debtRepaid) revert InvalidAmount();
 
         uint256 excessETH = msg.value - debtRepaid;
-        uint256 seizeValue = Math.mulDiv(debtRepaid, BASIS_POINTS + liquidationBonus, BASIS_POINTS);
-        uint256 seizeAmount = seizeValue >= collateralValue
-            ? loan.collateralAmount
-            : Math.mulDiv(loan.collateralAmount, seizeValue, collateralValue);
-        uint256 surplusCollateral = loan.collateralAmount - seizeAmount;
+        (uint256 seizeAmount, uint256 surplusCollateral) = _calculateSeizure(
+            loan.collateralAmount,
+            collateralValue,
+            debtRepaid
+        );
 
         // Update state before external calls (Checks-Effects-Interactions)
-        loan.remainingRepaymentAmount = 0;
-        loan.state = LoanState.Liquidated;
-        borrowerActiveLoans[loan.borrower]--;
-        lenderActiveLoans[loan.lender]--;
-        activeLoansCount--;
+        _closeFundedLoan(loan, LoanState.Liquidated);
         liquidatedLoansCount++;
-        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
 
         // Transfer ETH and collateral
         _safeTransferETHOrQueue(loan.lender, debtRepaid);
@@ -763,30 +723,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @return Array of loan IDs
      */
     function getBorrowerLoans(address borrower) external view returns (uint256[] memory) {
-        uint256[] storage allLoanIds = _borrowerLoanIds[borrower];
-        uint256 activeCount = 0;
-
-        // First pass: count matching loans
-        for (uint256 i = 0; i < allLoanIds.length; i++) {
-            LoanState state = loans[allLoanIds[i]].state;
-            if (state == LoanState.Requested || state == LoanState.Funded) {
-                activeCount++;
-            }
-        }
-
-        uint256[] memory activeLoanIds = new uint256[](activeCount);
-        uint256 counter = 0;
-
-        // Second pass: populate result array
-        for (uint256 i = 0; i < allLoanIds.length; i++) {
-            LoanState state = loans[allLoanIds[i]].state;
-            if (state == LoanState.Requested || state == LoanState.Funded) {
-                activeLoanIds[counter] = allLoanIds[i];
-                counter++;
-            }
-        }
-
-        return activeLoanIds;
+        return _filterLoansByState(_borrowerLoanIds[borrower], true);
     }
 
     /**
@@ -808,22 +745,26 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
      * @return Array of loan IDs
      */
     function getLenderLoans(address lender) external view returns (uint256[] memory) {
-        uint256[] storage allLoanIds = _lenderLoanIds[lender];
-        uint256 activeCount = 0;
+        return _filterLoansByState(_lenderLoanIds[lender], false);
+    }
 
-        // First pass: count matching loans
+    function _filterLoansByState(
+        uint256[] storage allLoanIds,
+        bool includeRequested
+    ) internal view returns (uint256[] memory) {
+        uint256 activeCount = 0;
         for (uint256 i = 0; i < allLoanIds.length; i++) {
-            if (loans[allLoanIds[i]].state == LoanState.Funded) {
+            LoanState state = loans[allLoanIds[i]].state;
+            if (state == LoanState.Funded || (includeRequested && state == LoanState.Requested)) {
                 activeCount++;
             }
         }
 
         uint256[] memory activeLoanIds = new uint256[](activeCount);
         uint256 counter = 0;
-
-        // Second pass: populate result array
         for (uint256 i = 0; i < allLoanIds.length; i++) {
-            if (loans[allLoanIds[i]].state == LoanState.Funded) {
+            LoanState state = loans[allLoanIds[i]].state;
+            if (state == LoanState.Funded || (includeRequested && state == LoanState.Requested)) {
                 activeLoanIds[counter] = allLoanIds[i];
                 counter++;
             }
@@ -1070,9 +1011,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (msg.sender != offer.lender) revert Unauthorized();
         if (offer.state != OfferState.Created) revert InvalidLoanState();
 
-        offer.state = OfferState.Cancelled;
-        lockedETH -= offer.principalAmount;
-        _safeTransferETHOrQueue(offer.lender, offer.principalAmount);
+        _refundOffer(offer, OfferState.Cancelled);
         emit LoanOfferCancelled(offerId);
     }
 
@@ -1093,72 +1032,150 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (borrowerActiveLoans[msg.sender] >= maxActiveLoansPerBorrower) revert TooManyActiveLoans();
         if (interestRate == 0 || interestRate > offer.maxInterestRate) revert InvalidInterestRate();
         if (duration < offer.minDuration || duration > offer.maxDuration) revert InvalidDuration();
-        if (collateralAmount == 0) revert InvalidCollateral();
-        if (collateralToken == address(0)) revert InvalidAddress();
-        if (!allowedCollateralTokens[collateralToken]) revert TokenNotAllowed();
+        _validateCollateralInput(collateralToken, collateralAmount);
         if (offer.requiredCollateralToken != address(0) && collateralToken != offer.requiredCollateralToken) {
             revert TokenNotAllowed();
         }
 
         uint256 principal = offer.principalAmount;
-        uint256 repaymentAmount;
-        {
-            uint256 annualInterest = Math.mulDiv(principal, interestRate, BASIS_POINTS);
-            uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
-            repaymentAmount = principal + interestAmount;
-        }
-
-        uint256 balanceBefore = IERC20(collateralToken).balanceOf(address(this));
-        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
-        uint256 actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
-        if (actualCollateral == 0) revert InvalidCollateral();
-
-        {
-            uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
-            uint256 effectiveRatio = offer.minCollateralRatio > collateralRatio
-                ? offer.minCollateralRatio
-                : collateralRatio;
-            uint256 requiredCollateralValueInETH = Math.mulDiv(
-                repaymentAmount,
-                effectiveRatio,
-                BASIS_POINTS,
-                Math.Rounding.Up
-            );
-            if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
-        }
-
-        lockedCollateral[collateralToken] += actualCollateral;
+        uint256 repaymentAmount = _calculateRepaymentAmount(principal, interestRate, duration);
+        uint256 effectiveRatio = offer.minCollateralRatio > collateralRatio
+            ? offer.minCollateralRatio
+            : collateralRatio;
+        uint256 actualCollateral = _depositAndValidateCollateral(
+            collateralToken,
+            collateralAmount,
+            repaymentAmount,
+            effectiveRatio
+        );
 
         offer.state = OfferState.Accepted;
         lockedETH -= principal;
 
-        uint256 loanId = loanCount++;
+        uint256 loanId = _createLoanRecord(
+            principal,
+            interestRate,
+            repaymentAmount,
+            duration,
+            collateralToken,
+            actualCollateral
+        );
+        Loan storage loan = loans[loanId];
+        loan.lender = offer.lender;
+        loan.startTime = block.timestamp;
+        loan.state = LoanState.Funded;
+
+        lenderActiveLoans[offer.lender]++;
+        activeLoansCount++;
+        _lenderLoanIds[offer.lender].push(loanId);
+
+        _disburseLoanProceeds(msg.sender, principal);
+
+        emit LoanOfferAccepted(offerId, loanId, msg.sender);
+    }
+
+    function _validateCollateralInput(address collateralToken, uint256 collateralAmount) internal view {
+        if (collateralAmount == 0) revert InvalidCollateral();
+        if (collateralToken == address(0)) revert InvalidAddress();
+        if (!allowedCollateralTokens[collateralToken]) revert TokenNotAllowed();
+    }
+
+    function _createLoanRecord(
+        uint256 principalAmount,
+        uint256 interestRate,
+        uint256 repaymentAmount,
+        uint256 duration,
+        address collateralToken,
+        uint256 collateralAmount
+    ) internal returns (uint256 loanId) {
+        loanId = loanCount++;
         loans[loanId] = Loan({
             borrower: payable(msg.sender),
-            lender: offer.lender,
-            principalAmount: principal,
+            lender: payable(address(0)),
+            principalAmount: principalAmount,
             interestRate: uint16(interestRate),
             repaymentAmount: repaymentAmount,
             duration: duration,
-            startTime: block.timestamp,
-            state: LoanState.Funded,
+            startTime: 0,
+            state: LoanState.Requested,
             collateralToken: collateralToken,
-            collateralAmount: actualCollateral,
+            collateralAmount: collateralAmount,
             remainingRepaymentAmount: repaymentAmount
         });
-
         borrowerActiveLoans[msg.sender]++;
-        lenderActiveLoans[offer.lender]++;
-        activeLoansCount++;
         _borrowerLoanIds[msg.sender].push(loanId);
-        _lenderLoanIds[offer.lender].push(loanId);
+    }
 
+    function _touchReputation(address borrower, UserReputation storage rep) internal {
+        rep.lastActivityTimestamp = block.timestamp;
+        emit ReputationUpdated(borrower, rep.totalLoans, rep.repaidLoans, rep.defaultedLoans);
+    }
+
+    function _refundOffer(LoanOffer storage offer, OfferState newState) internal {
+        offer.state = newState;
+        lockedETH -= offer.principalAmount;
+        _safeTransferETHOrQueue(offer.lender, offer.principalAmount);
+    }
+
+    function _calculateRepaymentAmount(
+        uint256 principal,
+        uint256 interestRate,
+        uint256 duration
+    ) internal pure returns (uint256) {
+        uint256 annualInterest = Math.mulDiv(principal, interestRate, BASIS_POINTS);
+        uint256 interestAmount = Math.mulDiv(annualInterest, duration, SECONDS_PER_YEAR);
+        return principal + interestAmount;
+    }
+
+    function _depositAndValidateCollateral(
+        address collateralToken,
+        uint256 collateralAmount,
+        uint256 repaymentAmount,
+        uint256 requiredRatio
+    ) internal returns (uint256 actualCollateral) {
+        uint256 balanceBefore = IERC20(collateralToken).balanceOf(address(this));
+        IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
+        actualCollateral = IERC20(collateralToken).balanceOf(address(this)) - balanceBefore;
+        if (actualCollateral == 0) revert InvalidCollateral();
+
+        uint256 collateralValueInETH = getCollateralValueInETH(collateralToken, actualCollateral);
+        uint256 requiredCollateralValueInETH = Math.mulDiv(
+            repaymentAmount,
+            requiredRatio,
+            BASIS_POINTS,
+            Math.Rounding.Up
+        );
+        if (collateralValueInETH < requiredCollateralValueInETH) revert InsufficientCollateralValue();
+
+        lockedCollateral[collateralToken] += actualCollateral;
+    }
+
+    function _disburseLoanProceeds(address borrower, uint256 principal) internal {
         uint256 feeAmount = principal * platformFee / BASIS_POINTS;
         uint256 amountToBorrower = principal - feeAmount;
         _safeTransferETHOrQueue(feeRecipient, feeAmount);
-        _safeTransferETHOrQueue(msg.sender, amountToBorrower);
+        _safeTransferETHOrQueue(borrower, amountToBorrower);
+    }
 
-        emit LoanOfferAccepted(offerId, loanId, msg.sender);
+    function _calculateSeizure(
+        uint256 collateralAmount,
+        uint256 collateralValue,
+        uint256 debtAmount
+    ) internal view returns (uint256 seizeAmount, uint256 surplusCollateral) {
+        uint256 seizeValue = Math.mulDiv(debtAmount, BASIS_POINTS + liquidationBonus, BASIS_POINTS);
+        seizeAmount = seizeValue >= collateralValue
+            ? collateralAmount
+            : Math.mulDiv(collateralAmount, seizeValue, collateralValue);
+        surplusCollateral = collateralAmount - seizeAmount;
+    }
+
+    function _closeFundedLoan(Loan storage loan, LoanState newState) internal {
+        loan.remainingRepaymentAmount = 0;
+        loan.state = newState;
+        borrowerActiveLoans[loan.borrower]--;
+        lenderActiveLoans[loan.lender]--;
+        activeLoansCount--;
+        lockedCollateral[loan.collateralToken] -= loan.collateralAmount;
     }
 
     /**
@@ -1169,9 +1186,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable, Pausable {
         if (offer.state != OfferState.Created) revert InvalidLoanState();
         if (block.timestamp <= offer.expiresAt) revert OfferNotExpired();
 
-        offer.state = OfferState.Expired;
-        lockedETH -= offer.principalAmount;
-        _safeTransferETHOrQueue(offer.lender, offer.principalAmount);
+        _refundOffer(offer, OfferState.Expired);
         emit LoanOfferExpired(offerId);
     }
 

@@ -9,6 +9,8 @@ jobs:
         with: { node-version: '20', cache: 'npm' }
       - run: npm ci
       - run: npx hardhat compile
+      - name: Check EIP-170 contract bytecode size
+        run: node scripts/check-size.js
       - run: npx hardhat test
       - run: npx hardhat coverage
       - name: Check coverage thresholds
