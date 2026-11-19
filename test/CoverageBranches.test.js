@@ -209,4 +209,92 @@ describe("Coverage Branch Completion (Issue #16)", function () {
         await expect(lending.connect(borrower).acceptLoanOffer(1, 500, 86400, tokenAddr, ethers.parseEther("1")))
             .to.be.revertedWithCustomError(lending, "TooManyActiveLoans");
     });
+
+    it("should cover remaining offer state, invalid offerId, and max collateral ratio branches (Issue #57)", async function () {
+        const tokenAddr = await mockToken.getAddress();
+
+        // createLoanOffer with minCollateralRatio > MAX_COLLATERAL_RATIO (20000)
+        await expect(
+            lending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, tokenAddr, 20001, {
+                value: ethers.parseEther("1"),
+            })
+        ).to.be.revertedWithCustomError(lending, "InvalidParameter");
+
+        // Invalid offerId on acceptLoanOffer and expireLoanOffer
+        await expect(
+            lending.connect(borrower).acceptLoanOffer(999, 500, 86400, tokenAddr, ethers.parseEther("1"))
+        ).to.be.revertedWithCustomError(lending, "InvalidOfferId");
+        await expect(lending.connect(other).expireLoanOffer(999))
+            .to.be.revertedWithCustomError(lending, "InvalidOfferId");
+
+        // Create and cancel an offer, then verify cancelLoanOffer and expireLoanOffer revert with InvalidLoanState
+        await lending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, tokenAddr, 15000, {
+            value: ethers.parseEther("1"),
+        });
+        await lending.connect(lender).cancelLoanOffer(0);
+        await expect(lending.connect(lender).cancelLoanOffer(0))
+            .to.be.revertedWithCustomError(lending, "InvalidLoanState");
+        await expect(lending.connect(other).expireLoanOffer(0))
+            .to.be.revertedWithCustomError(lending, "InvalidLoanState");
+    });
+
+    it("should cover pause, invalid loanId, and onlyBorrower modifier branches on repayLoan, liquidate, and offers (Issue #57)", async function () {
+        const tokenAddr = await mockToken.getAddress();
+        await lending.connect(borrower).requestLoan(ethers.parseEther("1"), 500, 86400, tokenAddr, ethers.parseEther("1"));
+        await lending.connect(lender).fundLoan(0, { value: ethers.parseEther("1") });
+
+        await lending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, tokenAddr, 15000, {
+            value: ethers.parseEther("1"),
+        });
+
+        // repayLoan by non-borrower
+        await expect(lending.connect(other).repayLoan(0, { value: ethers.parseEther("0.1") }))
+            .to.be.revertedWithCustomError(lending, "Unauthorized");
+
+        // liquidate with invalid loanId
+        await expect(lending.connect(other).liquidate(999, { value: ethers.parseEther("1") }))
+            .to.be.revertedWithCustomError(lending, "InvalidLoanId");
+
+        // Pause contract and verify whenNotPaused revert on liquidate, createLoanOffer, acceptLoanOffer
+        await lending.pause();
+        await expect(lending.connect(other).liquidate(0, { value: ethers.parseEther("1.1") }))
+            .to.be.revertedWith("Pausable: paused");
+        await expect(
+            lending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, tokenAddr, 15000, {
+                value: ethers.parseEther("1"),
+            })
+        ).to.be.revertedWith("Pausable: paused");
+        await expect(
+            lending.connect(borrower).acceptLoanOffer(0, 500, 86400, tokenAddr, ethers.parseEther("1"))
+        ).to.be.revertedWith("Pausable: paused");
+    });
+
+    it("should cover setCollateralTokenStatus auto-decimals edge cases, setCollateralRatio < liquidationThreshold, and zero platformFee transfer (Issue #57)", async function () {
+        const MockERC20 = await ethers.getContractFactory("MockERC20");
+
+        // Token with decimals() > 18 should not auto-set collateralDecimalsSet
+        const highDecToken = await MockERC20.deploy("HighDec", "HD", 19);
+        const highDecAddr = await highDecToken.getAddress();
+        await lending.setCollateralTokenStatus(highDecAddr, true);
+        expect(await lending.collateralDecimalsSet(highDecAddr)).to.equal(false);
+
+        // Contract without decimals() (e.g. MockRevertingReceiver) should not auto-set collateralDecimalsSet
+        const MockRevertingReceiver = await ethers.getContractFactory("MockRevertingReceiver");
+        const nonTokenContract = await MockRevertingReceiver.deploy();
+        const nonTokenAddr = await nonTokenContract.getAddress();
+        await lending.setCollateralTokenStatus(nonTokenAddr, true);
+        expect(await lending.collateralDecimalsSet(nonTokenAddr)).to.equal(false);
+
+        // setCollateralRatio with _collateralRatio >= MIN_COLLATERAL_RATIO (10000) but < liquidationThreshold (12000)
+        await expect(lending.setCollateralRatio(11000))
+            .to.be.revertedWithCustomError(lending, "InvalidParameter");
+
+        // fundLoan with platformFee == 0 exercises _safeTransferETHOrQueue early return on amount == 0
+        await lending.setPlatformFee(0);
+        const tokenAddr = await mockToken.getAddress();
+        await lending.connect(borrower).requestLoan(ethers.parseEther("1"), 500, 86400, tokenAddr, ethers.parseEther("1"));
+        await lending.connect(lender).fundLoan(0, { value: ethers.parseEther("1") });
+        const loan = await lending.loans(0);
+        expect(loan.state).to.equal(1n); // LoanState.Funded
+    });
 });
