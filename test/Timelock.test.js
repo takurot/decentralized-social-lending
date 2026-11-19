@@ -250,6 +250,7 @@ describe("Timelock Governance (Issue #15)", function () {
             await lending.queueChange(selLiq, abiCoder.encode(["uint256"], [12500]));
 
             await time.increase(TIMELOCK_DELAY + 1);
+            await deployedFeed.setLatestPrice(ethers.parseUnits("2", 8));
 
             await expect(lending.setPriceFeed(tokenAddr, feedAddr))
                 .to.emit(lending, "PriceFeedUpdated")

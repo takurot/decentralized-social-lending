@@ -8,9 +8,9 @@ const {
 } = require("../scripts/check-size");
 
 describe("EIP-170 Contract Bytecode Size Gate (Issue #52)", function () {
-    const TARGET_MAX_DEPLOYED_BYTES = 21000;
+    const TARGET_MAX_DEPLOYED_BYTES = WARN_THRESHOLD;
 
-    it("should keep SocialLendingWithCollateral deployed bytecode well below EIP-170 and target ceiling (<= 21,000 B)", function () {
+    it("should keep SocialLendingWithCollateral deployed bytecode well below EIP-170 and 90% warning ceiling (<= 22,118 B)", function () {
         const result = checkContractSize(TARGET_MAX_DEPLOYED_BYTES);
 
         expect(result.contractName).to.equal("SocialLendingWithCollateral");

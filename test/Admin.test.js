@@ -128,11 +128,12 @@ describe("SocialLendingWithCollateral Admin", function () {
 
     describe("Emergency Functions", function () {
         it("should rescue ETH", async function () {
-            // Send ETH to contract
-            await owner.sendTransaction({
-                to: await socialLending.getAddress(),
-                value: ethers.parseEther("1.0")
-            });
+            // Simulate involuntary ETH balance on contract (e.g. from selfdestruct/coinbase)
+            const lendingAddr = await socialLending.getAddress();
+            await ethers.provider.send("hardhat_setBalance", [
+                lendingAddr,
+                ethers.toBeHex(ethers.parseEther("1.0"))
+            ]);
 
             const initialBalance = await ethers.provider.getBalance(user.address);
             await socialLending.rescueETH(ethers.parseEther("1.0"), user.address);

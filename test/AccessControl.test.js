@@ -106,14 +106,13 @@ describe("Access Control", function () {
             .to.be.revertedWithCustomError(socialLending, "InvalidAddress");
     });
 
-    it("should allow receiving ETH", async function () {
-        // Send ETH to contract
-        await owner.sendTransaction({
-            to: await socialLending.getAddress(),
-            value: ethers.parseEther("1")
-        });
-
-        expect(await ethers.provider.getBalance(await socialLending.getAddress())).to.equal(ethers.parseEther("1"));
+    it("should reject direct plain ETH transfers without calldata", async function () {
+        await expect(
+            owner.sendTransaction({
+                to: await socialLending.getAddress(),
+                value: ethers.parseEther("1")
+            })
+        ).to.be.reverted;
     });
 
     it("should allow owner to setMaxLoanAmount", async function () {

@@ -468,7 +468,12 @@ describe("SocialLendingWithCollateral Security", function () {
                 .withArgs(await mockToken.getAddress(), extraTokens, owner.address);
 
             const extraETH = ethers.parseEther("0.5");
-            await owner.sendTransaction({ to: await socialLending.getAddress(), value: extraETH });
+            const lendingAddr = await socialLending.getAddress();
+            const curBal = await ethers.provider.getBalance(lendingAddr);
+            await ethers.provider.send("hardhat_setBalance", [
+                lendingAddr,
+                ethers.toBeHex(curBal + extraETH)
+            ]);
             await expect(
                 socialLending.connect(owner).rescueETH(extraETH, owner.address)
             )
