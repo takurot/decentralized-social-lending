@@ -17,6 +17,8 @@ jobs:
         run: node scripts/check-warnings.js
       - name: Check EIP-170 contract bytecode size
         run: node scripts/check-size.js
+      - name: Run 6-phase E2E lifecycle verification
+        run: npm run e2e
       - run: npx hardhat test
       - run: npx hardhat coverage
       - name: Check coverage thresholds

@@ -18,6 +18,16 @@ const config: HardhatUserConfig = {
   networks: {
     hardhat: {
       chainId: 31337,
+      ...(process.env.FORK_RPC_URL
+        ? {
+            forking: {
+              url: process.env.FORK_RPC_URL,
+              ...(process.env.FORK_BLOCK_NUMBER
+                ? { blockNumber: Number(process.env.FORK_BLOCK_NUMBER) }
+                : {}),
+            },
+          }
+        : {}),
     },
     sepolia: {
       url: process.env.SEPOLIA_RPC_URL || "",

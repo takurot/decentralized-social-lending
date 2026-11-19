@@ -58,7 +58,8 @@ Because the contract is non-upgradeable, recovering from a critical vulnerabilit
 - `contracts/interfaces/AggregatorV3Interface.sol` — Chainlink price feed interface
 - `contracts/mocks/` — `MockERC20`, `MockFeeOnTransferERC20`, `MockPriceFeed`, and `MockRevertingReceiver` test doubles
 - `scripts/deploy.ts` — Deployment script supporting `FEE_RECIPIENT` override
-- `test/` — Hardhat test suites
+- `scripts/e2e-verify.ts` — 6-phase end-to-end lifecycle verification runner with 100% ABI function invocation audit
+- `test/` — Hardhat test suites (including `test/E2E.test.js` and `test/Invariant.test.js`)
 
 ## Getting Started
 
@@ -66,6 +67,8 @@ Because the contract is non-upgradeable, recovering from a critical vulnerabilit
 npm install
 npm run compile
 npm test
+npm run test:e2e
+npm run e2e
 npm run coverage
 ```
 
@@ -77,6 +80,8 @@ Configure the following environment variables before deploying to a live network
 - `PRIVATE_KEY` — Deployer wallet private key
 - `ETHERSCAN_API_KEY` — Etherscan API key for contract verification
 - `FEE_RECIPIENT` — (Optional) Platform fee recipient address (defaults to deployer)
+- `FORK_RPC_URL` — (Optional) JSON-RPC URL to enable Hardhat network forking for E2E / integration runs
+- `FORK_BLOCK_NUMBER` — (Optional) Pinned block number when `FORK_RPC_URL` is set
 
 ```bash
 npx hardhat run scripts/deploy.ts --network sepolia
