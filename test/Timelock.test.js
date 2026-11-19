@@ -202,6 +202,8 @@ describe("Timelock Governance (Issue #15)", function () {
 
             await expect(lending.setPriceFeed(tokenAddr, feedAddr))
                 .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
+            await expect(lending.setPriceFeedTimeout(tokenAddr, 3600))
+                .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
             await expect(lending.setCollateralTokenDecimals(tokenAddr, 6))
                 .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
             await expect(lending.setGracePeriod(3 * 86400))
@@ -217,6 +219,10 @@ describe("Timelock Governance (Issue #15)", function () {
                 .to.be.revertedWithCustomError(lending, "InvalidAddress");
             await expect(lending.setPriceFeed(tokenAddr, ethers.ZeroAddress))
                 .to.be.revertedWithCustomError(lending, "InvalidAddress");
+            await expect(lending.setPriceFeedTimeout(ethers.ZeroAddress, 3600))
+                .to.be.revertedWithCustomError(lending, "InvalidAddress");
+            await expect(lending.setPriceFeedTimeout(tokenAddr, 60))
+                .to.be.revertedWithCustomError(lending, "InvalidParameter");
             await expect(lending.setCollateralTokenDecimals(ethers.ZeroAddress, 6))
                 .to.be.revertedWithCustomError(lending, "InvalidAddress");
             await expect(lending.setCollateralTokenDecimals(tokenAddr, 19))

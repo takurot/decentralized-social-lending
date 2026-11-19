@@ -53,6 +53,10 @@ describe("v1.3.0 Governance, Lifecycle, Scalability, and TypeScript Infra (#44, 
         });
 
         it("should enforce two-step ownership transfer (Ownable2Step)", async function () {
+            // Overwriting pendingOwner before acceptance works cleanly
+            await lending.transferOwnership(keeper.address);
+            expect(await lending.pendingOwner()).to.equal(keeper.address);
+
             await expect(lending.transferOwnership(newOwner.address))
                 .to.emit(lending, "OwnershipTransferStarted")
                 .withArgs(owner.address, newOwner.address);
@@ -70,6 +74,9 @@ describe("v1.3.0 Governance, Lifecycle, Scalability, and TypeScript Infra (#44, 
 
             expect(await lending.owner()).to.equal(newOwner.address);
             expect(await lending.pendingOwner()).to.equal(ethers.ZeroAddress);
+
+            // Previous owner no longer has onlyOwner privileges
+            await expect(lending.connect(owner).pause()).to.be.revertedWith("Ownable: caller is not the owner");
         });
 
         it("should disable renounceOwnership() for owner and non-owner (#67)", async function () {
@@ -144,6 +151,48 @@ describe("v1.3.0 Governance, Lifecycle, Scalability, and TypeScript Infra (#44, 
             await network.provider.send("evm_mine");
             await expect(lending.setPlatformFee(300)).to.emit(lending, "PlatformFeeUpdated").withArgs(300);
         });
+
+        it("should enforce exact grace-period boundary (== executeAfter + TIMELOCK_GRACE_PERIOD) and allow cancelChange on expired entry", async function () {
+            const selector = lending.interface.getFunction("setPlatformFee").selector;
+            const params220 = ethers.AbiCoder.defaultAbiCoder().encode(["uint256"], [220]);
+
+            const tx1 = await lending.queueChange(selector, params220);
+            const receipt1 = await tx1.wait();
+            const event1 = receipt1.logs.find((l) => l.fragment && l.fragment.name === "ChangeQueued");
+            const executeAfter1 = Number(event1.args[3]);
+            const exactDeadline1 = executeAfter1 + FOURTEEN_DAYS;
+
+            // At exact executeAfter + TIMELOCK_GRACE_PERIOD: execution succeeds (inclusive boundary)
+            await network.provider.send("evm_setNextBlockTimestamp", [exactDeadline1]);
+            await expect(lending.setPlatformFee(220)).to.emit(lending, "PlatformFeeUpdated").withArgs(220);
+
+            // Queue another change: test duplicate queueChange at exact executeAfter + TIMELOCK_GRACE_PERIOD,
+            // then let it expire past executeAfter + TIMELOCK_GRACE_PERIOD + 1 and cancelChange
+            const params240 = ethers.AbiCoder.defaultAbiCoder().encode(["uint256"], [240]);
+            const tx2 = await lending.queueChange(selector, params240);
+            const receipt2 = await tx2.wait();
+            const event2 = receipt2.logs.find((l) => l.fragment && l.fragment.name === "ChangeQueued");
+            const opHash2 = event2.args[0];
+            const executeAfter2 = Number(event2.args[3]);
+            const exactDeadline2 = executeAfter2 + FOURTEEN_DAYS;
+
+            await network.provider.send("evm_setNextBlockTimestamp", [exactDeadline2]);
+            await expect(lending.queueChange(selector, params240)).to.be.revertedWithCustomError(
+                lending,
+                "ChangeAlreadyQueued"
+            );
+
+            await network.provider.send("evm_setNextBlockTimestamp", [exactDeadline2 + 1]);
+            await expect(lending.setPlatformFee(240)).to.be.revertedWithCustomError(lending, "ChangeExpired");
+
+            // cancelChange on an expired (unexecuted) entry succeeds and cleans up storage
+            await expect(lending.cancelChange(opHash2)).to.emit(lending, "ChangeCancelled").withArgs(opHash2);
+            const cleaned = await lending.pendingChanges(opHash2);
+            expect(cleaned.executeAfter).to.equal(0n);
+
+            // Re-queuing after cancelChange succeeds
+            await expect(lending.queueChange(selector, params240)).to.emit(lending, "ChangeQueued");
+        });
     });
 
     describe("Issue #66: Permissionless expireLoanRequest() and active borrower loan filtering", function () {
@@ -196,10 +245,69 @@ describe("v1.3.0 Governance, Lifecycle, Scalability, and TypeScript Infra (#44, 
             expect(loan.state).to.equal(4n); // LoanState.Cancelled
 
             // Calling expireLoanRequest again on a Cancelled loan reverts with InvalidLoanState
+            expect(await lending.cancelledLoansCount()).to.equal(1n);
             await expect(lending.connect(keeper).expireLoanRequest(0)).to.be.revertedWithCustomError(
                 lending,
                 "InvalidLoanState"
             );
+            await expect(lending.connect(keeper).expireLoanRequest(999)).to.be.revertedWithCustomError(
+                lending,
+                "InvalidLoanId"
+            );
+        });
+
+        it("should enforce exact expiresAt boundary and shrink getBorrowerLoans array across mixed loan states", async function () {
+            const tokenAddr = await mockToken.getAddress();
+            await lending.setMaxActiveLoansPerBorrower(5);
+
+            // Loan 0: Requested -> will expire without expireLoanRequest being called yet
+            await lending
+                .connect(borrower)
+                .requestLoan(ethers.parseEther("0.5"), 500, 30 * 24 * 3600, tokenAddr, ethers.parseEther("0.5"));
+            const loan0 = await lending.loans(0);
+            const expiresAt0 = Number(loan0.expiresAt);
+
+            // At exact expiresAt0: still active in getBorrowerLoans, and expireLoanRequest reverts with LoanNotExpired
+            await network.provider.send("evm_setNextBlockTimestamp", [expiresAt0]);
+            await expect(lending.connect(keeper).expireLoanRequest(0)).to.be.revertedWithCustomError(
+                lending,
+                "LoanNotExpired"
+            );
+            expect(await lending.getBorrowerLoans(borrower.address)).to.deep.equal([0n]);
+
+            // Advance 10 seconds past Loan 0's expiresAt and refresh oracle feed
+            await network.provider.send("evm_setNextBlockTimestamp", [expiresAt0 + 10]);
+            await mockPriceFeed.setLatestPrice(ethers.parseUnits("2000", 8));
+
+            // Loan 1: Requested -> Funded (active)
+            await lending
+                .connect(borrower)
+                .requestLoan(ethers.parseEther("0.5"), 500, 30 * 24 * 3600, tokenAddr, ethers.parseEther("0.5"));
+            await lending.connect(lender).fundLoan(1, { value: ethers.parseEther("0.5") });
+
+            // expireLoanRequest on Funded Loan 1 must revert with InvalidLoanState
+            await expect(lending.connect(keeper).expireLoanRequest(1)).to.be.revertedWithCustomError(
+                lending,
+                "InvalidLoanState"
+            );
+
+            // Loan 2: Requested -> Funded -> Repaid (closed)
+            await lending
+                .connect(borrower)
+                .requestLoan(ethers.parseEther("0.5"), 500, 30 * 24 * 3600, tokenAddr, ethers.parseEther("0.5"));
+            await lending.connect(lender).fundLoan(2, { value: ethers.parseEther("0.5") });
+            const loan2 = await lending.loans(2);
+            await lending.connect(borrower).repayLoan(2, { value: loan2.remainingRepaymentAmount });
+
+            // Loan 3: Requested and unexpired (active)
+            await lending
+                .connect(borrower)
+                .requestLoan(ethers.parseEther("0.5"), 500, 30 * 24 * 3600, tokenAddr, ethers.parseEther("0.5"));
+
+            // borrowerActiveLoans is 3 (Loan 0 un-cleaned expired + Loan 1 Funded + Loan 3 Requested unexpired),
+            // but getBorrowerLoans shrinks the output in memory to only [1n, 3n]!
+            expect(await lending.borrowerActiveLoans(borrower.address)).to.equal(3n);
+            expect(await lending.getBorrowerLoans(borrower.address)).to.deep.equal([1n, 3n]);
         });
     });
 
@@ -245,6 +353,16 @@ describe("v1.3.0 Governance, Lifecycle, Scalability, and TypeScript Infra (#44, 
             const [lPage1, lTotal] = await lending.getLenderLoansPaginated(lender.address, 1, 2);
             expect(lTotal).to.equal(3n);
             expect(lPage1).to.deep.equal([1n, 2n]);
+
+            const [lEmptyOffset] = await lending.getLenderLoansPaginated(lender.address, 5, 2);
+            expect(lEmptyOffset).to.deep.equal([]);
+
+            const [lZeroLimit] = await lending.getLenderLoansPaginated(lender.address, 0, 0);
+            expect(lZeroLimit).to.deep.equal([]);
+
+            const [noLoansPage, noLoansTotal] = await lending.getBorrowerLoansPaginated(keeper.address, 0, 5);
+            expect(noLoansTotal).to.equal(0n);
+            expect(noLoansPage).to.deep.equal([]);
 
             // Loan offers pagination
             const [oPage1, oTotal] = await lending.getLoanOffersPaginated(0, 2);

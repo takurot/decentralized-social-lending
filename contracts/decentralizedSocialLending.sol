@@ -272,14 +272,20 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable 
         revert InvalidParameter();
     }
 
-    // ... (existing code for setCollateralRatio etc)
-
+    /**
+     * @notice Sets the maximum number of concurrent active loans per borrower
+     * @param _max The new maximum active loan count per borrower (must be > 0)
+     */
     function setMaxActiveLoansPerBorrower(uint256 _max) external onlyOwner {
         if (_max == 0) revert InvalidParameter();
         maxActiveLoansPerBorrower = _max;
         emit MaxActiveLoansPerBorrowerUpdated(_max);
     }
 
+    /**
+     * @notice Sets the maximum principal amount allowed for a single loan or offer
+     * @param _maxLoanAmount The new maximum loan principal in wei (must be > 0)
+     */
     function setMaxLoanAmount(uint256 _maxLoanAmount) external onlyOwner {
         if (_maxLoanAmount == 0) revert InvalidParameter();
         maxLoanAmount = _maxLoanAmount;
@@ -993,6 +999,9 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable 
 
     /**
      * @notice Queues a timelocked admin parameter change.
+     * @param functionSelector The 4-byte function selector of the timelocked setter.
+     * @param params The ABI-encoded parameters for the setter call.
+     * @return operationHash The unique hash identifying the queued operation.
      */
     function queueChange(
         bytes4 functionSelector,
@@ -1019,6 +1028,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable 
 
     /**
      * @notice Cancels a queued timelock change before execution.
+     * @param operationHash The hash of the queued operation to cancel.
      */
     function cancelChange(bytes32 operationHash) external onlyOwner {
         PendingChange storage change = pendingChanges[operationHash];
@@ -1178,6 +1188,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable 
 
     /**
      * @notice Creates a lender-initiated loan offer by escrowing ETH
+     * @param maxInterestRate Maximum annual interest rate in basis points
+     * @param minDuration Minimum loan duration in seconds
+     * @param maxDuration Maximum loan duration in seconds
+     * @param requiredCollateralToken Required collateral token address (or address(0) for any allowed token)
+     * @param minCollateralRatio Minimum collateralization ratio in basis points
      */
     function createLoanOffer(
         uint256 maxInterestRate,
@@ -1217,6 +1232,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable 
 
     /**
      * @notice Cancels an open loan offer and refunds ETH to the lender
+     * @param offerId The ID of the loan offer to cancel
      */
     function cancelLoanOffer(uint256 offerId) external nonReentrant validOfferId(offerId) {
         LoanOffer storage offer = loanOffers[offerId];
@@ -1229,6 +1245,11 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable 
 
     /**
      * @notice Accepts an open loan offer by depositing collateral and creating a funded loan
+     * @param offerId The ID of the loan offer to accept
+     * @param interestRate The agreed annual interest rate in basis points
+     * @param duration The agreed loan duration in seconds
+     * @param collateralToken The collateral token address
+     * @param collateralAmount The amount of collateral to deposit
      */
     function acceptLoanOffer(
         uint256 offerId,
@@ -1408,6 +1429,7 @@ contract SocialLendingWithCollateral is ReentrancyGuard, Ownable2Step, Pausable 
 
     /**
      * @notice Expires a past-due loan offer and refunds ETH to the lender
+     * @param offerId The ID of the expired loan offer
      */
     function expireLoanOffer(uint256 offerId) external nonReentrant validOfferId(offerId) {
         LoanOffer storage offer = loanOffers[offerId];

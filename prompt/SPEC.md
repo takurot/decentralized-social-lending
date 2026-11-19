@@ -205,10 +205,18 @@ function _consumeTimelock(bytes4 functionSelector, bytes memory params) internal
 }
 ```
 
-**対象関数**: `setPlatformFee`, `setFeeRecipient`, `setCollateralRatio`（旧 `setLTVRatio`）, `setCollateralTokenStatus`, `setPriceFeed`, `setCollateralTokenDecimals`, `setGracePeriod`, `setLiquidationThreshold`
+**対象関数**: `setPlatformFee`, `setFeeRecipient`, `setCollateralRatio`（旧 `setLTVRatio`）, `setCollateralTokenStatus`, `setPriceFeed`, `setPriceFeedTimeout`, `setCollateralTokenDecimals`, `setGracePeriod`, `setLiquidationThreshold`（計9関数）
+
+**v1.3.0 ガバナンス・タイムロック強化仕様（#44, #55, #67）**:
+- **デフォルト有効化（#44）**: デプロイ時点から `bool public timelockEnabled = true;` とし、全9個の管理用セッターに48時間タイムロック（`TIMELOCK_DELAY = 48 hours`）を強制する。後方互換のため `enableTimelock()` は `onlyOwner` で残し、既に有効なため `InvalidParameter()` で revert する。
+- **2段階オーナーシップ移転と放棄禁止（#44, #67）**: OpenZeppelin `Ownable2Step`（`transferOwnership` + `acceptOwnership`）を採用し、誤操作や鍵漏洩によるプロトコル永久凍結（`pause` 解除不能・オラクル更新不能）を防ぐため `renounceOwnership()` は `onlyOwner` で常に `InvalidParameter()` により revert する。
+- **有効期限グレースウィンドウ・セレクタ検証・重複キュー防止（#55）**:
+  - `TIMELOCK_GRACE_PERIOD = 14 days` を導入し、`block.timestamp > change.executeAfter + TIMELOCK_GRACE_PERIOD` の場合は `_consumeTimelock` で `ChangeExpired()` により revert する。
+  - `queueChange(bytes4 functionSelector, bytes calldata params)` は `_isTimelockedSelector(functionSelector)` で許可された9個のセッターセレクタのみを受け付け、それ以外は `InvalidParameter()` で revert する。
+  - 同一 `callKey = keccak256(abi.encode(functionSelector, params))` が未実行かつグレース期間内（`block.timestamp <= executeAfter + TIMELOCK_GRACE_PERIOD`）に再度キューされた場合は `ChangeAlreadyQueued()` で revert する。グレース期間超過後に再キューされた場合は期限切れの `pendingChanges[existingHash]` を削除して再キューを許可する。
 
 > [!NOTE]
-> `pause()` はタイムロック対象外とする（緊急停止の即時性が必要なため）
+> `pause()` / `unpause()`、`setMaxLoanAmount`、`setMaxActiveLoansPerBorrower`、`rescueTokens`、`rescueETH` はタイムロック対象外とする（緊急停止や上限引き下げ等の即時対応が必要なため）。
 
 > [!NOTE]
 > オラクル価格サニティ境界: コントラクト上では `setPriceFeed` 時のコントラクト存在・インターフェースプローブ（`decimals() <= 18`・`latestRoundData()` の正価格確認）と、評価時の鮮度（`PRICE_FEED_TIMEOUT = 1 hour`）・ラウンド整合性・`decimals <= 18` を検証する。トークン別の絶対価格上下限（min/max）や前回比乖離アラートはオフチェーン監視の責務とする。
@@ -319,6 +327,18 @@ uint256 public cancelledLoansCount;
 
 > [!WARNING]
 > Codex レビュー指摘: 現行の `getBorrowerLoans` / `getLenderLoans` は `Requested` または `Funded` 状態のローンのみをフィルタして返す。ID配列を直接返すと完了・キャンセル済みIDも含まれるため、**返却時に `loan.state` をチェックしてフィルタする**か、**状態遷移時に配列から除去する**（ガスコストとのトレードオフ）。推奨は前者（view関数内でフィルタ）。
+
+**v1.3.0 スケーラビリティ・ページネーション・期限切れリクエスト整理仕様（#56, #66）**:
+- **単一パスフィルタと期限切れリクエスト除外（#56, #66）**:
+  - `_filterLoansByState` は `borrowerActiveLoans[borrower]` / `lenderActiveLoans[lender]` を上限として1パスで走査し、`counter < maxActive` に達した時点で早期終了する。
+  - `getBorrowerLoans(borrower)` は `LoanState.Funded`、および未期限切れの `LoanState.Requested`（`block.timestamp <= loan.expiresAt`）のみを返し、期限切れリクエスト（`block.timestamp > loan.expiresAt`）を除外する。
+- **パーミッションレスな `expireLoanRequest(uint256 loanId)`（#66）**:
+  - `LoanState.Requested` かつ `block.timestamp > loan.expiresAt`（`LOAN_REQUEST_EXPIRATION = 30 days`）のローンリクエストに対し、誰でも（Paused 中でも）`expireLoanRequest(loanId)` を呼び出して `LoanState.Cancelled` に遷移させ、担保トークンを借り手へ返却し、`borrowerActiveLoans`・`lockedCollateral`・`cancelledLoansCount` を更新できる（`LoanCancelled(loanId, borrower)` イベントを発行）。
+- **ページネーション付き View 関数（#56）**:
+  - `getBorrowerLoansPaginated(address borrower, uint256 offset, uint256 limit) external view returns (uint256[] memory loanIds, uint256 total)`
+  - `getLenderLoansPaginated(address lender, uint256 offset, uint256 limit) external view returns (uint256[] memory loanIds, uint256 total)`
+  - `getLoanOffersPaginated(uint256 offset, uint256 limit) external view returns (uint256[] memory offerIds, uint256 total)`
+  - いずれも `offset >= total` または `limit == 0` の場合は revert せず空配列と `total` を返す。
 
 ---
 
