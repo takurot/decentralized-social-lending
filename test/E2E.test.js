@@ -18,6 +18,6 @@ describe("Comprehensive End-to-End Lifecycle Verification (Issue #64)", function
         expect(report.finalState.allTokenBalancesZero).to.equal(true);
         expect(report.finalState.statsConsistent).to.equal(true);
         expect(report.finalState.timelockEnabled).to.equal(true);
-        expect(report.finalState.ownerAfterRenounce).to.equal("0x0000000000000000000000000000000000000000");
+        expect(report.finalState.ownerAfterRenounce).to.not.equal("0x0000000000000000000000000000000000000000");
     });
 });

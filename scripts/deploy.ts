@@ -44,6 +44,7 @@ export async function main() {
 
     console.log("SocialLendingWithCollateral deployed to:", address);
     console.log("Fee recipient:", feeRecipient);
+    console.log("Timelock enabled by default:", await lending.timelockEnabled());
 }
 
 if (require.main === module) {

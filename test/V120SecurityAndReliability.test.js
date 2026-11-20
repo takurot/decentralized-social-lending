@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { wrapWithTimelock } = require("./helpers/timelock");
 
 describe("Milestone v1.2.0 Security & Reliability Hardening (Issues #48, #49, #50, #51, #53, #54)", function () {
     let lending, mockToken, mockPriceFeed;
@@ -19,8 +20,9 @@ describe("Milestone v1.2.0 Security & Reliability Hardening (Issues #48, #49, #5
         await mockPriceFeed.setLatestPrice(ethers.parseUnits("2", 8)); // 1 MTK = 2 ETH
 
         const Lending = await ethers.getContractFactory("SocialLendingWithCollateral");
-        lending = await Lending.deploy(owner.address);
-        await lending.waitForDeployment();
+        const deployed = await Lending.deploy(owner.address);
+        await deployed.waitForDeployment();
+        lending = wrapWithTimelock(deployed, [mockPriceFeed]);
 
         const tokenAddr = await mockToken.getAddress();
         await lending.setCollateralTokenStatus(tokenAddr, true);

@@ -70,6 +70,30 @@ async function advanceTime(seconds: number) {
     await network.provider.send("evm_mine");
 }
 
+/**
+ * Asserts that a call reverts with the given custom error. Decodes revert data via the ABI when
+ * present; the error message text is consulted only when the provider returns no revert data.
+ */
+async function expectCustomErrorRevert(
+    iface: { parseError(data: string): { name: string } | null },
+    call: () => Promise<unknown>,
+    errorName: string,
+    label: string
+): Promise<void> {
+    try {
+        await call();
+    } catch (err: any) {
+        const data = typeof err?.data === "string" ? err.data : err?.data?.data;
+        if (typeof data === "string" && data !== "0x") {
+            if (iface.parseError(data)?.name === errorName) return;
+        } else if (String(err?.message ?? err).includes(errorName)) {
+            return;
+        }
+        throw new Error(`${label} reverted with unexpected error: ${err?.message ?? err}`);
+    }
+    throw new Error(`${label} should have reverted`);
+}
+
 export async function runE2EVerification(options: { silent?: boolean } = {}): Promise<E2EReport> {
     const log = (...args: any[]) => {
         if (!options.silent) {
@@ -142,32 +166,45 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     const t0Addr = await token0.getAddress();
     const tFeeAddr = await feeToken.getAddress();
 
-    await lending.setCollateralTokenStatus(t18Addr, true);
-    await lending.setCollateralTokenStatus(t6Addr, true);
-    await lending.setCollateralTokenStatus(t0Addr, true);
-    await lending.setCollateralTokenStatus(tFeeAddr, true);
+    const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+    const timelockDelay = Number(await lending.TIMELOCK_DELAY());
+    await lending.TIMELOCK_GRACE_PERIOD();
 
-    await lending.setCollateralTokenDecimals(t18Addr, 18);
-    await lending.setCollateralTokenDecimals(t6Addr, 6);
-    await lending.setCollateralTokenDecimals(t0Addr, 0);
-    await lending.setCollateralTokenDecimals(tFeeAddr, 18);
+    const execTimelocked = async (fnName: string, types: string[], values: any[]) => {
+        const selector = lending.interface.getFunction(fnName).selector;
+        const params = abiCoder.encode(types, values);
+        await lending.queueChange(selector, params);
+        await advanceTime(timelockDelay + 1);
+        await refreshAllFeeds("2");
+        await lending[fnName](...values);
+    };
 
-    await lending.setPriceFeed(t18Addr, await feed18.getAddress());
-    await lending.setPriceFeed(t6Addr, await feed6.getAddress());
-    await lending.setPriceFeed(t0Addr, await feed0.getAddress());
-    await lending.setPriceFeed(tFeeAddr, await feedFee.getAddress());
+    await execTimelocked("setCollateralTokenStatus", ["address", "bool"], [t18Addr, true]);
+    await execTimelocked("setCollateralTokenStatus", ["address", "bool"], [t6Addr, true]);
+    await execTimelocked("setCollateralTokenStatus", ["address", "bool"], [t0Addr, true]);
+    await execTimelocked("setCollateralTokenStatus", ["address", "bool"], [tFeeAddr, true]);
 
-    await lending.setPriceFeedTimeout(t18Addr, 24 * 3600);
+    await execTimelocked("setCollateralTokenDecimals", ["address", "uint8"], [t18Addr, 18]);
+    await execTimelocked("setCollateralTokenDecimals", ["address", "uint8"], [t6Addr, 6]);
+    await execTimelocked("setCollateralTokenDecimals", ["address", "uint8"], [t0Addr, 0]);
+    await execTimelocked("setCollateralTokenDecimals", ["address", "uint8"], [tFeeAddr, 18]);
+
+    await execTimelocked("setPriceFeed", ["address", "address"], [t18Addr, await feed18.getAddress()]);
+    await execTimelocked("setPriceFeed", ["address", "address"], [t6Addr, await feed6.getAddress()]);
+    await execTimelocked("setPriceFeed", ["address", "address"], [t0Addr, await feed0.getAddress()]);
+    await execTimelocked("setPriceFeed", ["address", "address"], [tFeeAddr, await feedFee.getAddress()]);
+
+    await execTimelocked("setPriceFeedTimeout", ["address", "uint256"], [t18Addr, 24 * 3600]);
     const effTimeout = await lending.getEffectivePriceFeedTimeout(t18Addr);
     if (effTimeout !== 86400n) throw new Error("Unexpected effective timeout");
 
     await lending.setMaxLoanAmount(ethers.parseEther("20"));
     await lending.setMaxActiveLoansPerBorrower(5);
-    await lending.setPlatformFee(100);
-    await lending.setFeeRecipient(owner.address);
-    await lending.setCollateralRatio(15000);
-    await lending.setGracePeriod(3 * 86400);
-    await lending.setLiquidationThreshold(12000);
+    await execTimelocked("setPlatformFee", ["uint256"], [100]);
+    await execTimelocked("setFeeRecipient", ["address"], [owner.address]);
+    await execTimelocked("setCollateralRatio", ["uint256"], [15000]);
+    await execTimelocked("setGracePeriod", ["uint256"], [3 * 86400]);
+    await execTimelocked("setLiquidationThreshold", ["uint256"], [12000]);
 
     // Read all public constants and state/mapping getters
     await lending.BASIS_POINTS();
@@ -181,11 +218,11 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     const reqExpiryWindow = Number(await lending.LOAN_REQUEST_EXPIRATION());
     await lending.MAX_LOAN_DURATION();
     await lending.MAX_GRACE_PERIOD();
-    const timelockDelay = Number(await lending.TIMELOCK_DELAY());
     await lending.MIN_COLLATERAL_RATIO();
     await lending.MAX_COLLATERAL_RATIO();
 
     await lending.owner();
+    await lending.pendingOwner();
     await lending.paused();
     await lending.timelockEnabled();
     await lending.platformFee();
@@ -235,20 +272,22 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     await lending.connect(borrower).requestLoan(ethers.parseEther("1"), 500, 7 * 86400, t18Addr, ethers.parseEther("1"));
     await lending.connect(borrower).cancelLoanRequest(0);
 
-    // Loan #1: request -> expire -> cancel
+    // Loan #1: request -> expire -> permissionless expireLoanRequest (#66)
     await lending.connect(borrower).requestLoan(ethers.parseEther("1"), 500, 7 * 86400, t6Addr, ethers.parseUnits("1", 6));
     await advanceTime(reqExpiryWindow + 10);
     await refreshAllFeeds("2");
-    await lending.connect(borrower).cancelLoanRequest(1);
+    await lending.connect(other).expireLoanRequest(1);
 
     // Loan #2: fee-on-transfer token request -> platformFee hike (snapshot check) -> fund -> views -> partial + full repay
     await lending.connect(borrower).requestLoan(ethers.parseEther("1"), 500, 7 * 86400, tFeeAddr, ethers.parseEther("2"));
-    await lending.setPlatformFee(400); // Raise fee after request; Loan #2 keeps 100 bp snapshot
+    await execTimelocked("setPlatformFee", ["uint256"], [400]); // Raise fee after request; Loan #2 keeps 100 bp snapshot
     await lending.connect(lender).fundLoan(2, { value: ethers.parseEther("1") });
-    await lending.setPlatformFee(100);
+    await execTimelocked("setPlatformFee", ["uint256"], [100]);
 
     await lending.getBorrowerLoans(borrower.address);
+    await lending.getBorrowerLoansPaginated(borrower.address, 0, 10);
     await lending.getLenderLoans(lender.address);
+    await lending.getLenderLoansPaginated(lender.address, 0, 10);
     await lending.getCollateralValueInETH(tFeeAddr, ethers.parseEther("1.9"));
     await lending.getCollateralizationRatio(2);
     const loan2 = await lending.loans(2);
@@ -271,6 +310,7 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     });
     await lending.connect(lender).cancelLoanOffer(0);
     await lending.loanOffers(0);
+    await lending.getLoanOffersPaginated(0, 10);
 
     // Offer #1: create -> expire
     await lending.connect(lender).createLoanOffer(1000, 86400, 30 * 86400, t18Addr, 15000, {
@@ -334,7 +374,7 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     log("[E2E][Phase 5] Running pull-payment withdrawETH/withdrawETHTo, pause-time unwind, and rescueTokens/rescueETH...");
 
     await revertingReceiver.setShouldRevert(true);
-    await lending.setFeeRecipient(revertingAddr);
+    await execTimelocked("setFeeRecipient", ["address"], [revertingAddr]);
 
     // Loan #8 (Funded) and Loan #9 (Requested) created before pause
     await lending.connect(borrower).requestLoan(ethers.parseEther("1"), 500, 7 * 86400, t18Addr, ethers.parseEther("1"));
@@ -361,7 +401,7 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     await revertingReceiver.setShouldRevert(false);
     const withdrawData = lending.interface.encodeFunctionData("withdrawETH", []);
     await revertingReceiver.callContract(lendingAddr, withdrawData);
-    await lending.setFeeRecipient(owner.address);
+    await execTimelocked("setFeeRecipient", ["address"], [owner.address]);
 
     // Rescue unlocked donated tokens and force-fed ETH
     const donatedTokens = ethers.parseUnits("5", 18);
@@ -378,10 +418,11 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     // =========================================================================
     // PHASE 6: 48-Hour Timelock Governance & Ownership Lifecycle
     // =========================================================================
-    log("[E2E][Phase 6] Running 48-hour timelock queue/cancel/execute and ownership transfer/renounce...");
+    log("[E2E][Phase 6] Running 48-hour timelock queue/cancel/execute and two-step ownership transfer...");
 
-    await lending.enableTimelock();
-    const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+    // enableTimelock() is disabled (already enabled by default); verify it reverts with InvalidParameter
+    await expectCustomErrorRevert(lending.interface, () => lending.enableTimelock(), "InvalidParameter", "enableTimelock");
+
     const setFeeSelector = lending.interface.getFunction("setPlatformFee").selector;
 
     const txCancel = await lending.queueChange(setFeeSelector, abiCoder.encode(["uint256"], [250]));
@@ -404,7 +445,14 @@ export async function runE2EVerification(options: { silent?: boolean } = {}): Pr
     await lending.setPlatformFee(200);
 
     await lending.transferOwnership(newOwner.address);
-    await lending.connect(newOwner).renounceOwnership();
+    await lending.connect(newOwner).acceptOwnership();
+    // renounceOwnership() is disabled (#67); verify it reverts with InvalidParameter and ownership remains with newOwner
+    await expectCustomErrorRevert(
+        lending.interface,
+        () => lending.connect(newOwner).renounceOwnership(),
+        "InvalidParameter",
+        "renounceOwnership"
+    );
 
     phasesCompleted = 6;
 

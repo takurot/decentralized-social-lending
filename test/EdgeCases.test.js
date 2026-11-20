@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { wrapWithTimelock } = require("./helpers/timelock");
 
 describe("Edge Cases", function () {
     let socialLending;
@@ -26,8 +27,9 @@ describe("Edge Cases", function () {
 
         // Deploy Social Lending
         const SocialLending = await ethers.getContractFactory("SocialLendingWithCollateral");
-        socialLending = await SocialLending.deploy(owner.address);
-        await socialLending.waitForDeployment();
+        const deployed = await SocialLending.deploy(owner.address);
+        await deployed.waitForDeployment();
+        socialLending = wrapWithTimelock(deployed, [mockPriceFeed]);
 
         // Setup collateral
         await socialLending.setCollateralTokenStatus(await mockToken.getAddress(), true);

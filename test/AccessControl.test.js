@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { wrapWithTimelock } = require("./helpers/timelock");
 
 describe("Access Control", function () {
     let socialLending;
@@ -20,8 +21,9 @@ describe("Access Control", function () {
 
         // Deploy Social Lending
         const SocialLending = await ethers.getContractFactory("SocialLendingWithCollateral");
-        socialLending = await SocialLending.deploy(owner.address);
-        await socialLending.waitForDeployment();
+        const deployed = await SocialLending.deploy(owner.address);
+        await deployed.waitForDeployment();
+        socialLending = wrapWithTimelock(deployed, [mockPriceFeed]);
     });
 
     it("should revert setPlatformFee if called by non-owner", async function () {

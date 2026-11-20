@@ -21,25 +21,19 @@ describe("Timelock Governance (Issue #15)", function () {
         await lending.waitForDeployment();
     });
 
-    it("should have TIMELOCK_DELAY = 48 hours and timelockEnabled = false by default", async function () {
+    it("should have TIMELOCK_DELAY = 48 hours and timelockEnabled = true by default", async function () {
         expect(await lending.TIMELOCK_DELAY()).to.equal(TIMELOCK_DELAY);
-        expect(await lending.timelockEnabled()).to.equal(false);
+        expect(await lending.timelockEnabled()).to.equal(true);
     });
 
-    it("should allow immediate admin updates before timelock is enabled", async function () {
+    it("should enforce timelock immediately from deployment without calling enableTimelock", async function () {
         await expect(lending.setPlatformFee(200))
-            .to.emit(lending, "PlatformFeeUpdated")
-            .withArgs(200);
-        expect(await lending.platformFee()).to.equal(200);
+            .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
     });
 
-    it("should restrict enableTimelock to owner and prevent re-enabling", async function () {
+    it("should restrict enableTimelock to owner and revert since timelock is already enabled", async function () {
         await expect(lending.connect(user1).enableTimelock())
             .to.be.revertedWith("Ownable: caller is not the owner");
-
-        await expect(lending.enableTimelock())
-            .to.emit(lending, "TimelockEnabled");
-        expect(await lending.timelockEnabled()).to.equal(true);
 
         await expect(lending.enableTimelock())
             .to.be.revertedWithCustomError(lending, "InvalidParameter");
@@ -47,10 +41,6 @@ describe("Timelock Governance (Issue #15)", function () {
 
     describe("When timelock is enabled", function () {
         const abiCoder = ethers.AbiCoder.defaultAbiCoder();
-
-        beforeEach(async function () {
-            await lending.enableTimelock();
-        });
 
         it("should keep pause and unpause immediate", async function () {
             await lending.pause();
@@ -182,16 +172,20 @@ describe("Timelock Governance (Issue #15)", function () {
             await expect(lending.setPlatformFee(300))
                 .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
 
-            // Queue twice with same selector+params; cancelling older opHash1b must not wipe newer opHash2
+            // Queue again with same selector+params; duplicate active queue must revert with ChangeAlreadyQueued
             const tx1b = await lending.queueChange(selector, params);
             const r1b = await tx1b.wait();
             const opHash1b = r1b.logs.find((l) => l.fragment?.name === "ChangeQueued").args.operationHash;
 
+            await expect(lending.queueChange(selector, params))
+                .to.be.revertedWithCustomError(lending, "ChangeAlreadyQueued");
+
+            // After cancelling opHash1b, re-queuing succeeds and can be executed
+            await lending.cancelChange(opHash1b);
             const tx2 = await lending.queueChange(selector, params);
             const r2 = await tx2.wait();
             const opHash2 = r2.logs.find((l) => l.fragment?.name === "ChangeQueued").args.operationHash;
 
-            await lending.cancelChange(opHash1b);
             await time.increase(TIMELOCK_DELAY + 1);
 
             await expect(lending.setPlatformFee(300))
@@ -208,6 +202,8 @@ describe("Timelock Governance (Issue #15)", function () {
 
             await expect(lending.setPriceFeed(tokenAddr, feedAddr))
                 .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
+            await expect(lending.setPriceFeedTimeout(tokenAddr, 3600))
+                .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
             await expect(lending.setCollateralTokenDecimals(tokenAddr, 6))
                 .to.be.revertedWithCustomError(lending, "ChangeNotQueued");
             await expect(lending.setGracePeriod(3 * 86400))
@@ -223,6 +219,10 @@ describe("Timelock Governance (Issue #15)", function () {
                 .to.be.revertedWithCustomError(lending, "InvalidAddress");
             await expect(lending.setPriceFeed(tokenAddr, ethers.ZeroAddress))
                 .to.be.revertedWithCustomError(lending, "InvalidAddress");
+            await expect(lending.setPriceFeedTimeout(ethers.ZeroAddress, 3600))
+                .to.be.revertedWithCustomError(lending, "InvalidAddress");
+            await expect(lending.setPriceFeedTimeout(tokenAddr, 60))
+                .to.be.revertedWithCustomError(lending, "InvalidParameter");
             await expect(lending.setCollateralTokenDecimals(ethers.ZeroAddress, 6))
                 .to.be.revertedWithCustomError(lending, "InvalidAddress");
             await expect(lending.setCollateralTokenDecimals(tokenAddr, 19))
